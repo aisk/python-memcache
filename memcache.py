@@ -28,7 +28,7 @@ class Connection:
         self.stream.close()
         self.socket.close()
 
-    def send_meta_command(self, command: MetaCommand) -> MetaResult:
+    def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         header = b" ".join([command.cm, command.key] + command.flags + [b"\r\n"])
         self.stream.write(header)
         if command.value:
@@ -54,3 +54,6 @@ class Memcache:
     def __init__(self, address: str):
         self.address = address
         self.connection = Connection("localhost", 12345)
+
+    def execute_meta_command(self, command: MetaCommand) -> MetaResult:
+        return self.connection.execute_meta_command(command)
