@@ -67,7 +67,7 @@ class Connection:
 class Memcache:
     def __init__(self, address: str):
         self.address = address
-        self.connection = Connection("localhost", 12345)
+        self.connection = Connection("localhost", 11211)
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         return self.connection.execute_meta_command(command)
