@@ -18,3 +18,8 @@ def test_hello(connection):
     assert result.rc == b"VA"
     assert result.value == b"bar"
     connection.close()
+
+
+def test_flush_all(connection):
+    connection.flush_all()
+    connection.flush_all()

@@ -3,6 +3,13 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 
+NEWLINE = b"\r\n"
+
+
+class MemcacheError(Exception):
+    ...
+
+
 @dataclass
 class MetaCommand:
     cm: bytes
@@ -27,6 +34,13 @@ class Connection:
     def close(self) -> None:
         self.stream.close()
         self.socket.close()
+
+    def flush_all(self) -> None:
+        self.stream.write(b"flush_all\r\n")
+        self.stream.flush()
+        response = self.stream.readline()
+        if response != b"OK\r\n":
+            raise MemcacheError(response.removesuffix(NEWLINE))
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         header = b" ".join([command.cm, command.key] + command.flags + [b"\r\n"])
@@ -57,3 +71,6 @@ class Memcache:
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         return self.connection.execute_meta_command(command)
+
+    def flush_all(self) -> None:
+        return self.connection.flush_all()
