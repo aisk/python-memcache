@@ -5,7 +5,7 @@ import memcache
 
 @pytest.fixture()
 def client():
-    return memcache.Memcache("memcache://localhost:12345")
+    return memcache.Memcache("memcache://localhost:11211")
 
 
 def test_hello(client):
