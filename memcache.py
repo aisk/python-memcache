@@ -1,6 +1,6 @@
 import socket
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 
 
 NEWLINE = b"\r\n"
@@ -26,9 +26,9 @@ class MetaResult:
 
 
 class Connection:
-    def __init__(self, ip: str, port: int):
+    def __init__(self, addr: Union[Tuple[str, int]]):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect((ip, port))
+        self.socket.connect(addr)
         self.stream = self.socket.makefile(mode="rwb")
 
     def close(self) -> None:
@@ -65,9 +65,8 @@ class Connection:
 
 
 class Memcache:
-    def __init__(self, address: str):
-        self.address = address
-        self.connection = Connection("localhost", 11211)
+    def __init__(self, addr: Union[Tuple[str, int]]):
+        self.connection = Connection(addr)
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         return self.connection.execute_meta_command(command)
