@@ -64,12 +64,22 @@ class Connection:
         return MetaResult(rc=rc, flags=flags, value=value)
 
 
+Addr = Tuple[str, int]
+
+
 class Memcache:
-    def __init__(self, addr: Union[Tuple[str, int]]):
-        self.connection = Connection(addr)
+    def __init__(self, addr: Union[Addr, List[Addr]]):
+        if isinstance(addr, list):
+            self.connections = [Connection(x) for x in addr]
+        else:
+            self.connections = [Connection(addr)]
+
+    def _get_connection(self, key) -> Connection:
+        return self.connections[hash(key) % len(self.connections)]
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
-        return self.connection.execute_meta_command(command)
+        return self._get_connection(command.key).execute_meta_command(command)
 
     def flush_all(self) -> None:
-        return self.connection.flush_all()
+        for connection in self.connections:
+            connection.flush_all()

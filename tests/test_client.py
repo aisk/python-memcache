@@ -17,7 +17,6 @@ def test_hello(client):
     result = client.execute_meta_command(command)
     assert result.rc == b"VA"
     assert result.value == b"bar"
-    client.connection.close()
 
 
 def test_flush_all(client):
