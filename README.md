@@ -16,8 +16,8 @@ $ pip install memcache
 
 ## About the Project
 
-Vox is &copy; 2020-2021 by [aisk](https://github.com/aisk).
+Memcache is &copy; 2020-2021 by [aisk](https://github.com/aisk).
 
 ### License
 
-Vox is distributed by a [MIT license](https://github.com/aisk/memcache/tree/master/LICENSE).
+Memcache is distributed by a [MIT license](https://github.com/aisk/memcache/tree/master/LICENSE).
