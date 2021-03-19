@@ -8,7 +8,7 @@ def client():
     return memcache.Memcache(("localhost", 11211))
 
 
-def test_hello(client):
+def test_execute_command(client):
     command = memcache.MetaCommand(cm=b"ms", key=b"foo", flags=[b"S3"], value=b"bar")
     result = client.execute_meta_command(command)
     assert result.rc == b"OK"
@@ -17,6 +17,11 @@ def test_hello(client):
     result = client.execute_meta_command(command)
     assert result.rc == b"VA"
     assert result.value == b"bar"
+
+
+def test_set_get(client):
+    client.set(b"foofoo", b"barbar")
+    assert client.get(b"foofoo") == b"barbar"
 
 
 def test_flush_all(client):
