@@ -28,6 +28,12 @@ def test_set_get(client):
     assert client.get(b"foofoo") is None
 
 
+def test_delete(client):
+    client.set(b"to_be_deleted", b"xxxx")
+    client.delete(b"to_be_deleted")
+    assert client.get(b"to_be_deleted") is None
+
+
 def test_flush_all(client):
     client.flush_all()
     client.flush_all()
