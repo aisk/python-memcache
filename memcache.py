@@ -72,7 +72,7 @@ class Connection:
                               value=value)
         self.execute_meta_command(command)
 
-    def get(self, key: bytes) -> bytes:
+    def get(self, key: bytes) -> Optional[bytes]:
         command = MetaCommand(cm=b"mg", key=key, flags=[b"v"], value=None)
         return self.execute_meta_command(command).value
 
@@ -104,7 +104,7 @@ class Memcache:
     def set(self, key: bytes, value: bytes, *, expire: Optional[int] = None) -> None:
         return self._get_connection(key).set(key, value, expire=expire)
 
-    def get(self, key: bytes) -> bytes:
+    def get(self, key: bytes) -> Optional[bytes]:
         return self._get_connection(key).get(key)
 
     def delete(self, key: bytes) -> None:
