@@ -76,6 +76,10 @@ class Connection:
         command = MetaCommand(cm=b"mg", key=key, flags=[b"v"], value=None)
         return self.execute_meta_command(command).value
 
+    def delete(self, key: bytes) -> None:
+        command = MetaCommand(cm=b"md", key=key, flags=[], value=None)
+        self.execute_meta_command(command).value
+
 
 Addr = Tuple[str, int]
 
@@ -102,3 +106,6 @@ class Memcache:
 
     def get(self, key: bytes) -> bytes:
         return self._get_connection(key).get(key)
+
+    def delete(self, key: bytes) -> None:
+        return self._get_connection(key).delete(key)
