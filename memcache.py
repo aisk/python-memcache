@@ -63,8 +63,12 @@ class Connection:
             self.stream.read(2)  # read the "\r\n"
         return MetaResult(rc=rc, flags=flags, value=value)
 
-    def set(self, key: bytes, value: bytes) -> None:
-        command = MetaCommand(cm=b"ms", key=key, flags=[b"S%d" % len(value)],
+    def set(self, key: bytes, value: bytes, expire: Optional[int] = None) -> None:
+        flags = [b"S%d" % len(value)]
+        if expire:
+            flags.append(b"T%d" % expire)
+
+        command = MetaCommand(cm=b"ms", key=key, flags=flags,
                               value=value)
         self.execute_meta_command(command)
 
@@ -93,8 +97,8 @@ class Memcache:
         for connection in self.connections:
             connection.flush_all()
 
-    def set(self, key: bytes, value: bytes) -> None:
-        return self._get_connection(key).set(key, value)
+    def set(self, key: bytes, value: bytes, *, expire: Optional[int] = None) -> None:
+        return self._get_connection(key).set(key, value, expire=expire)
 
     def get(self, key: bytes) -> bytes:
         return self._get_connection(key).get(key)
