@@ -10,12 +10,26 @@ class MemcacheError(Exception):
     ...
 
 
-@dataclass
+@dataclass(init=False)
 class MetaCommand:
     cm: bytes
     key: bytes
     flags: List[bytes]
     value: Optional[bytes]
+
+    def __init__(
+        self,
+        cm: bytes,
+        key: Union[bytes, str],
+        flags: List[bytes],
+        value: Optional[bytes],
+    ) -> None:
+        if isinstance(key, str):
+            key = key.encode()
+        self.cm = cm
+        self.key = key
+        self.flags = flags
+        self.value = value
 
 
 @dataclass
@@ -63,20 +77,21 @@ class Connection:
             self.stream.read(2)  # read the "\r\n"
         return MetaResult(rc=rc, flags=flags, value=value)
 
-    def set(self, key: bytes, value: bytes, expire: Optional[int] = None) -> None:
+    def set(
+        self, key: Union[bytes, str], value: bytes, expire: Optional[int] = None
+    ) -> None:
         flags = [b"S%d" % len(value)]
         if expire:
             flags.append(b"T%d" % expire)
 
-        command = MetaCommand(cm=b"ms", key=key, flags=flags,
-                              value=value)
+        command = MetaCommand(cm=b"ms", key=key, flags=flags, value=value)
         self.execute_meta_command(command)
 
-    def get(self, key: bytes) -> Optional[bytes]:
+    def get(self, key: Union[bytes, str]) -> Optional[bytes]:
         command = MetaCommand(cm=b"mg", key=key, flags=[b"v"], value=None)
         return self.execute_meta_command(command).value
 
-    def delete(self, key: bytes) -> None:
+    def delete(self, key: Union[bytes, str]) -> None:
         command = MetaCommand(cm=b"md", key=key, flags=[], value=None)
         self.execute_meta_command(command).value
 
@@ -101,11 +116,13 @@ class Memcache:
         for connection in self.connections:
             connection.flush_all()
 
-    def set(self, key: bytes, value: bytes, *, expire: Optional[int] = None) -> None:
+    def set(
+        self, key: Union[bytes, str], value: bytes, *, expire: Optional[int] = None
+    ) -> None:
         return self._get_connection(key).set(key, value, expire=expire)
 
-    def get(self, key: bytes) -> Optional[bytes]:
+    def get(self, key: Union[bytes, str]) -> Optional[bytes]:
         return self._get_connection(key).get(key)
 
-    def delete(self, key: bytes) -> None:
+    def delete(self, key: Union[bytes, str]) -> None:
         return self._get_connection(key).delete(key)
