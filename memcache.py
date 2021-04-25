@@ -100,7 +100,8 @@ Addr = Tuple[str, int]
 
 
 class Memcache:
-    def __init__(self, addr: Union[Addr, List[Addr]]):
+    def __init__(self, addr: Union[Addr, List[Addr]] = None):
+        addr = addr or ("localhost", 11211)
         if isinstance(addr, list):
             self.connections = [Connection(x) for x in addr]
         else:
