@@ -41,8 +41,12 @@ class MetaResult:
 
 class Connection:
     def __init__(self, addr: Union[Tuple[str, int]]):
+        self._addr = addr
+        self._connect()
+
+    def _connect(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect(addr)
+        self.socket.connect(self._addr)
         self.stream = self.socket.makefile(mode="rwb")
 
     def close(self) -> None:
@@ -57,6 +61,14 @@ class Connection:
             raise MemcacheError(response.removesuffix(NEWLINE))
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
+        try:
+            return self._execute_meta_command(command)
+        except IndexError:
+            # This happens when connection is closed by memcached.
+            self._connect()
+            return self._execute_meta_command(command)
+
+    def _execute_meta_command(self, command: MetaCommand) -> MetaResult:
         header = b" ".join([command.cm, command.key] + command.flags + [b"\r\n"])
         self.stream.write(header)
         if command.value:
