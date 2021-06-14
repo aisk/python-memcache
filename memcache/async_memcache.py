@@ -1,7 +1,9 @@
 import asyncio
 from typing import List, Tuple, Union, Optional
 
-from .memcache import Addr, MemcacheError, MetaCommand, MetaResult
+from .errors import MemcacheError
+from .memcache import Addr
+from .meta_command import MetaCommand, MetaResult
 
 
 class AsyncConnection:

@@ -1,5 +1,7 @@
 from .async_memcache import AsyncMemcache
-from .memcache import Memcache, MetaCommand, MetaResult, MemcacheError
+from .errors import MemcacheError
+from .memcache import Memcache
+from .meta_command import MetaCommand, MetaResult
 
 __all__ = [
     "AsyncMemcache",
