@@ -1,42 +1,11 @@
 import socket
-from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
+
+from .errors import MemcacheError
+from .meta_command import MetaCommand, MetaResult
 
 
 NEWLINE = b"\r\n"
-
-
-class MemcacheError(Exception):
-    ...
-
-
-@dataclass(init=False)
-class MetaCommand:
-    cm: bytes
-    key: bytes
-    flags: List[bytes]
-    value: Optional[bytes]
-
-    def __init__(
-        self,
-        cm: bytes,
-        key: Union[bytes, str],
-        flags: List[bytes],
-        value: Optional[bytes],
-    ) -> None:
-        if isinstance(key, str):
-            key = key.encode()
-        self.cm = cm
-        self.key = key
-        self.flags = flags
-        self.value = value
-
-
-@dataclass
-class MetaResult:
-    rc: bytes
-    flags: List[bytes]
-    value: Optional[bytes]
 
 
 class Connection:
@@ -105,7 +74,7 @@ class Connection:
 
     def delete(self, key: Union[bytes, str]) -> None:
         command = MetaCommand(cm=b"md", key=key, flags=[], value=None)
-        self.execute_meta_command(command).value
+        self.execute_meta_command(command)
 
 
 Addr = Tuple[str, int]
