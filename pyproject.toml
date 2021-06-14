@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "memcache"
-version = "0.5.1"
+version = "0.6.0"
 description = ""
 readme = "README.md"
 authors = ["An Long <aisk1988@gmail.com>"]
