@@ -28,6 +28,13 @@ class AsyncConnection:
             raise MemcacheError(response.removesuffix(b"\r\n"))
 
     async def execute_meta_command(self, command: MetaCommand) -> MetaResult:
+        try:
+            return await self._execute_meta_command(command)
+        except (IndexError, ConnectionResetError, BrokenPipeError):
+            self._connected = False
+            return await self._execute_meta_command(command)
+
+    async def _execute_meta_command(self, command: MetaCommand) -> MetaResult:
         if not self._connected:
             await self._connect()
 
