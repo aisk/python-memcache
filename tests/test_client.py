@@ -22,10 +22,10 @@ def test_execute_command(client):
 
 
 def test_set_get(client):
-    client.set("foofoo", b"barbar", expire=1)
-    assert client.get(b"foofoo") == b"barbar"
+    client.set("foofoo", "barbar", expire=1)
+    assert client.get(b"foofoo") == "barbar"
     time.sleep(1.1)
-    assert client.get(b"foofoo") is None
+    assert client.get("foofoo") is None
 
 
 def test_delete(client):

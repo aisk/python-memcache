@@ -1,6 +1,7 @@
 import asyncio
-from typing import List, Tuple, Union, Optional
+from typing import Any, List, Tuple, Union, Optional
 
+from . import serialize
 from .errors import MemcacheError
 from .memcache import Addr
 from .meta_command import MetaCommand, MetaResult
@@ -59,18 +60,27 @@ class AsyncConnection:
         return MetaResult(rc=rc, flags=flags, value=value)
 
     async def set(
-        self, key: Union[bytes, str], value: bytes, expire: Optional[int] = None
+        self, key: Union[bytes, str], value: Any, expire: Optional[int] = None
     ) -> None:
-        flags = [b"S%d" % len(value)]
+        value, client_flags = serialize.dump(key, value)
+
+        flags = [b"S%d" % len(value), b"F%d" % client_flags]
         if expire:
             flags.append(b"T%d" % expire)
 
         command = MetaCommand(cm=b"ms", key=key, flags=flags, value=value)
         await self.execute_meta_command(command)
 
-    async def get(self, key: Union[bytes, str]) -> Optional[bytes]:
-        command = MetaCommand(cm=b"mg", key=key, flags=[b"v"], value=None)
-        return (await self.execute_meta_command(command)).value
+    async def get(self, key: Union[bytes, str]) -> Optional[Any]:
+        command = MetaCommand(cm=b"mg", key=key, flags=[b"v", b"f"], value=None)
+        result = await self.execute_meta_command(command)
+
+        if result.value is None:
+            return None
+
+        client_flags = int(result.flags[0][1:])
+
+        return serialize.load(key, result.value, client_flags)
 
     async def delete(self, key: Union[bytes, str]) -> None:
         command = MetaCommand(cm=b"md", key=key, flags=[], value=None)
@@ -96,11 +106,11 @@ class AsyncMemcache:
             await connection.flush_all()
 
     async def set(
-        self, key: Union[bytes, str], value: bytes, *, expire: Optional[int] = None
+        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> None:
         return await self._get_connection(key).set(key, value, expire=expire)
 
-    async def get(self, key: Union[bytes, str]) -> Optional[bytes]:
+    async def get(self, key: Union[bytes, str]) -> Optional[Any]:
         return await self._get_connection(key).get(key)
 
     async def delete(self, key: Union[bytes, str]) -> None:

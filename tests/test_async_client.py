@@ -24,8 +24,8 @@ async def test_execute_command(client):
 
 @pytest.mark.asyncio
 async def test_set_get(client):
-    await client.set("foofoo", b"barbar", expire=1)
-    assert await client.get(b"foofoo") == b"barbar"
+    await client.set("foofoo", ("barbar",), expire=1)
+    assert await client.get(b"foofoo") == ("barbar",)
     await asyncio.sleep(1.1)
     assert await client.get(b"foofoo") is None
 
