@@ -1,2 +1,6 @@
 class MemcacheError(Exception):
     ...
+
+
+class SerializeError(MemcacheError):
+    ...

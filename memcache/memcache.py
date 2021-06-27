@@ -1,6 +1,7 @@
 import socket
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
+from . import serialize
 from .errors import MemcacheError
 from .meta_command import MetaCommand, MetaResult
 
@@ -59,18 +60,27 @@ class Connection:
         return MetaResult(rc=rc, flags=flags, value=value)
 
     def set(
-        self, key: Union[bytes, str], value: bytes, expire: Optional[int] = None
+        self, key: Union[bytes, str], value: Any, expire: Optional[int] = None
     ) -> None:
-        flags = [b"S%d" % len(value)]
+        value, client_flags = serialize.dump(key, value)
+
+        flags = [b"S%d" % len(value), b"F%d" % client_flags]
         if expire:
             flags.append(b"T%d" % expire)
 
         command = MetaCommand(cm=b"ms", key=key, flags=flags, value=value)
         self.execute_meta_command(command)
 
-    def get(self, key: Union[bytes, str]) -> Optional[bytes]:
-        command = MetaCommand(cm=b"mg", key=key, flags=[b"v"], value=None)
-        return self.execute_meta_command(command).value
+    def get(self, key: Union[bytes, str]) -> Optional[Any]:
+        command = MetaCommand(cm=b"mg", key=key, flags=[b"v", b"f"], value=None)
+        result = self.execute_meta_command(command)
+
+        if result.value is None:
+            return None
+
+        client_flags = int(result.flags[0][1:])
+
+        return serialize.load(key, result.value, client_flags)
 
     def delete(self, key: Union[bytes, str]) -> None:
         command = MetaCommand(cm=b"md", key=key, flags=[], value=None)
@@ -99,11 +109,11 @@ class Memcache:
             connection.flush_all()
 
     def set(
-        self, key: Union[bytes, str], value: bytes, *, expire: Optional[int] = None
+        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> None:
         return self._get_connection(key).set(key, value, expire=expire)
 
-    def get(self, key: Union[bytes, str]) -> Optional[bytes]:
+    def get(self, key: Union[bytes, str]) -> Optional[Any]:
         return self._get_connection(key).get(key)
 
     def delete(self, key: Union[bytes, str]) -> None:
