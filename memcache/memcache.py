@@ -33,7 +33,7 @@ class Connection:
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         try:
             return self._execute_meta_command(command)
-        except IndexError:
+        except (IndexError, ConnectionResetError, BrokenPipeError):
             # This happens when connection is closed by memcached.
             self._connect()
             return self._execute_meta_command(command)
