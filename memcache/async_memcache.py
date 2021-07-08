@@ -1,15 +1,23 @@
 import asyncio
 from typing import Any, List, Tuple, Union, Optional
 
-from . import serialize
 from .errors import MemcacheError
 from .memcache import Addr
 from .meta_command import MetaCommand, MetaResult
+from .serialize import dump, load, DumpFunc, LoadFunc
 
 
 class AsyncConnection:
-    def __init__(self, addr: Union[Tuple[str, int]]):
+    def __init__(
+        self,
+        addr: Union[Tuple[str, int]],
+        *,
+        load_func: LoadFunc = load,
+        dump_func: DumpFunc = dump
+    ):
         self._addr = addr
+        self._load = load_func
+        self._dump = dump_func
         self._connected = False
 
     async def _connect(self) -> None:
@@ -62,7 +70,7 @@ class AsyncConnection:
     async def set(
         self, key: Union[bytes, str], value: Any, expire: Optional[int] = None
     ) -> None:
-        value, client_flags = serialize.dump(key, value)
+        value, client_flags = self._dump(key, value)
 
         flags = [b"S%d" % len(value), b"F%d" % client_flags]
         if expire:
@@ -80,7 +88,7 @@ class AsyncConnection:
 
         client_flags = int(result.flags[0][1:])
 
-        return serialize.load(key, result.value, client_flags)
+        return self._load(key, result.value, client_flags)
 
     async def delete(self, key: Union[bytes, str]) -> None:
         command = MetaCommand(cm=b"md", key=key, flags=[], value=None)
@@ -88,12 +96,23 @@ class AsyncConnection:
 
 
 class AsyncMemcache:
-    def __init__(self, addr: Union[Addr, List[Addr]] = None):
+    def __init__(
+        self,
+        addr: Union[Addr, List[Addr]] = None,
+        *,
+        load_func: LoadFunc = load,
+        dump_func: DumpFunc = dump
+    ):
         addr = addr or ("localhost", 11211)
         if isinstance(addr, list):
-            self.connections = [AsyncConnection(x) for x in addr]
+            self.connections = [
+                AsyncConnection(x, load_func=load_func, dump_func=dump_func)
+                for x in addr
+            ]
         else:
-            self.connections = [AsyncConnection(addr)]
+            self.connections = [
+                AsyncConnection(addr, load_func=load_func, dump_func=dump_func)
+            ]
 
     def _get_connection(self, key) -> AsyncConnection:
         return self.connections[hash(key) % len(self.connections)]
