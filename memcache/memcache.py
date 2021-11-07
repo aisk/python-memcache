@@ -60,6 +60,9 @@ class Connection:
         rc = parts[0]
         flags = parts[1:]
         value = None
+        if rc == b"CLIENT_ERROR":
+            # Old ascii protocol error.
+            raise MemcacheError(b" ".join(flags).decode("utf-8"))
         if rc == b"VA":
             size = int(parts[1])
             flags = parts[2:]
