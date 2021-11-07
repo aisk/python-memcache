@@ -12,7 +12,7 @@ NEWLINE = b"\r\n"
 class Connection:
     def __init__(
         self,
-        addr: Union[Tuple[str, int]],
+        addr: Tuple[str, int],
         *,
         load_func: LoadFunc = load,
         dump_func: DumpFunc = dump
