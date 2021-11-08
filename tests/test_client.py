@@ -11,9 +11,10 @@ def client():
 
 
 def test_execute_command(client):
-    command = memcache.MetaCommand(cm=b"ms", key=b"foo", flags=[b"S3"], value=b"bar")
+    command = memcache.MetaCommand(cm=b"ms", key=b"foo", datalen=3, flags=[b"T10"],
+                                   value=b"bar")
     result = client.execute_meta_command(command)
-    assert result.rc == b"OK"
+    assert result.rc == b"HD"
 
     command = memcache.MetaCommand(cm=b"mg", key=b"foo", flags=[b"v"], value=None)
     result = client.execute_meta_command(command)
