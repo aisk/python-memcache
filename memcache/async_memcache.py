@@ -51,8 +51,9 @@ class AsyncConnection:
             header = b" ".join([command.cm, command.key] + command.flags + [b"\r\n"])
         else:
             datalen = str(command.datalen).encode("utf-8")
-            header = b" ".join([command.cm, command.key, datalen] + command.flags
-                               + [b"\r\n"])
+            header = b" ".join(
+                [command.cm, command.key, datalen] + command.flags + [b"\r\n"]
+            )
         self.writer.write(header)
         if command.value:
             self.writer.write(command.value + b"\r\n")
@@ -93,8 +94,9 @@ class AsyncConnection:
         if expire:
             flags.append(b"T%d" % expire)
 
-        command = MetaCommand(cm=b"ms", key=key, datalen=len(value), flags=flags,
-                              value=value)
+        command = MetaCommand(
+            cm=b"ms", key=key, datalen=len(value), flags=flags, value=value
+        )
         await self.execute_meta_command(command)
 
     async def get(self, key: Union[bytes, str]) -> Optional[Any]:

@@ -12,8 +12,9 @@ def client():
 
 @pytest.mark.asyncio
 async def test_execute_command(client):
-    command = memcache.MetaCommand(cm=b"ms", key=b"foo", datalen=3, flags=[b"T10"],
-                                   value=b"bar")
+    command = memcache.MetaCommand(
+        cm=b"ms", key=b"foo", datalen=3, flags=[b"T10"], value=b"bar"
+    )
     result = await client.execute_meta_command(command)
     assert result.rc == b"HD"
 
