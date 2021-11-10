@@ -47,7 +47,12 @@ class AsyncConnection:
         if not self._connected:
             await self._connect()
 
-        header = b" ".join([command.cm, command.key] + command.flags + [b"\r\n"])
+        if command.datalen is None:
+            header = b" ".join([command.cm, command.key] + command.flags + [b"\r\n"])
+        else:
+            datalen = str(command.datalen).encode("utf-8")
+            header = b" ".join([command.cm, command.key, datalen] + command.flags
+                               + [b"\r\n"])
         self.writer.write(header)
         if command.value:
             self.writer.write(command.value + b"\r\n")
@@ -57,33 +62,43 @@ class AsyncConnection:
     async def _receive_meta_result(self) -> MetaResult:
         header = await self.reader.readline()
         parts = header.split()
+
         rc = parts[0]
-        flags = parts[1:]
-        value = None
         if rc == b"CLIENT_ERROR":
             # Old ascii protocol error.
-            raise MemcacheError(b" ".join(flags).decode("utf-8"))
+            raise MemcacheError(header)
+
+        flags = []
+        datalen = None
+        if len(parts) > 1:
+            if str(parts[1][0]).isdigit():
+                datalen = int(parts[1])
+                flags = parts[2:]
+            else:
+                flags = parts[1:]
+        value = None
         if rc == b"VA":
             size = int(parts[1])
             flags = parts[2:]
             value = await self.reader.read(size)
             await self.reader.read(2)  # read the "\r\n"
-        return MetaResult(rc=rc, flags=flags, value=value)
+        return MetaResult(rc=rc, datalen=datalen, flags=flags, value=value)
 
     async def set(
         self, key: Union[bytes, str], value: Any, expire: Optional[int] = None
     ) -> None:
         value, client_flags = self._dump(key, value)
 
-        flags = [b"S%d" % len(value), b"F%d" % client_flags]
+        flags = [b"F%d" % client_flags]
         if expire:
             flags.append(b"T%d" % expire)
 
-        command = MetaCommand(cm=b"ms", key=key, flags=flags, value=value)
+        command = MetaCommand(cm=b"ms", key=key, datalen=len(value), flags=flags,
+                              value=value)
         await self.execute_meta_command(command)
 
     async def get(self, key: Union[bytes, str]) -> Optional[Any]:
-        command = MetaCommand(cm=b"mg", key=key, flags=[b"v", b"f"], value=None)
+        command = MetaCommand(cm=b"mg", key=key, flags=[b"v", b"f"])
         result = await self.execute_meta_command(command)
 
         if result.value is None:
