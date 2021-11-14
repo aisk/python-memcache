@@ -1,6 +1,8 @@
 import asyncio
 from typing import Any, List, Tuple, Union, Optional
 
+import hashring
+
 from .errors import MemcacheError
 from .memcache import Addr
 from .meta_command import MetaCommand, MetaResult
@@ -104,23 +106,25 @@ class AsyncMemcache:
     ):
         addr = addr or ("localhost", 11211)
         if isinstance(addr, list):
-            self.connections = [
+            self._connections = hashring.HashRing([
                 AsyncConnection(x, load_func=load_func, dump_func=dump_func)
                 for x in addr
-            ]
+            ])
         else:
-            self.connections = [
+            self._connections = hashring.HashRing([
                 AsyncConnection(addr, load_func=load_func, dump_func=dump_func)
-            ]
+            ])
 
     def _get_connection(self, key) -> AsyncConnection:
-        return self.connections[hash(key) % len(self.connections)]
+        if isinstance(key, bytes):
+            key = key.decode("utf-8")
+        return self._connections.get_node(key)
 
     async def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         return await self._get_connection(command.key).execute_meta_command(command)
 
     async def flush_all(self) -> None:
-        for connection in self.connections:
+        for connection in self._connections.nodes:
             await connection.flush_all()
 
     async def set(

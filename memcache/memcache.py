@@ -1,6 +1,8 @@
 import socket
 from typing import Any, List, Optional, Tuple, Union
 
+import hashring
+
 from .errors import MemcacheError
 from .meta_command import MetaCommand, MetaResult
 from .serialize import dump, load, DumpFunc, LoadFunc
@@ -107,22 +109,24 @@ class Memcache:
     ):
         addr = addr or ("localhost", 11211)
         if isinstance(addr, list):
-            self.connections = [
+            self._connections = hashring.HashRing([
                 Connection(x, load_func=load_func, dump_func=dump_func) for x in addr
-            ]
+            ])
         else:
-            self.connections = [
+            self._connections = hashring.HashRing([
                 Connection(addr, load_func=load_func, dump_func=dump_func)
-            ]
+            ])
 
     def _get_connection(self, key) -> Connection:
-        return self.connections[hash(key) % len(self.connections)]
+        if isinstance(key, bytes):
+            key = key.decode("utf-8")
+        return self._connections.get_node(key)
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         return self._get_connection(command.key).execute_meta_command(command)
 
     def flush_all(self) -> None:
-        for connection in self.connections:
+        for connection in self._connections.nodes:
             connection.flush_all()
 
     def set(
