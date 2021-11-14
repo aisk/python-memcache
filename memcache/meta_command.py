@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
@@ -47,7 +45,7 @@ class MetaResult:
     value: Optional[bytes]
 
     @staticmethod
-    def load_header(line: bytes) -> MetaResult:
+    def load_header(line: bytes) -> "MetaResult":
         parts = line.split()
 
         rc = parts[0]
