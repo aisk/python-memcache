@@ -54,29 +54,15 @@ class AsyncConnection:
         return await self._receive_meta_result()
 
     async def _receive_meta_result(self) -> MetaResult:
-        header = await self.reader.readline()
-        parts = header.split()
+        result = MetaResult.load_header(await self.reader.readline())
 
-        rc = parts[0]
-        if rc == b"CLIENT_ERROR":
-            # Old ascii protocol error.
-            raise MemcacheError(header)
-
-        flags = []
-        datalen = None
-        if len(parts) > 1:
-            if str(parts[1][0]).isdigit():
-                datalen = int(parts[1])
-                flags = parts[2:]
-            else:
-                flags = parts[1:]
-        value = None
-        if rc == b"VA":
-            size = int(parts[1])
-            flags = parts[2:]
-            value = await self.reader.read(size)
+        if result.rc == b"VA":
+            if result.datalen is None:
+                raise MemcacheError("invalid response: missing datalen")
+            result.value = await self.reader.read(result.datalen)
             await self.reader.read(2)  # read the "\r\n"
-        return MetaResult(rc=rc, datalen=datalen, flags=flags, value=value)
+
+        return result
 
     async def set(
         self, key: Union[bytes, str], value: Any, expire: Optional[int] = None

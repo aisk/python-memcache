@@ -54,29 +54,15 @@ class Connection:
         return self._receive_meta_result()
 
     def _receive_meta_result(self) -> MetaResult:
-        header = self.stream.readline()
-        parts = header.split()
+        result = MetaResult.load_header(self.stream.readline())
 
-        rc = parts[0]
-        if rc == b"CLIENT_ERROR":
-            # Old ascii protocol error.
-            raise MemcacheError(header)
-
-        flags = []
-        datalen = None
-        if len(parts) > 1:
-            if str(parts[1][0]).isdigit():
-                datalen = int(parts[1])
-                flags = parts[2:]
-            else:
-                flags = parts[1:]
-        value = None
-        if rc == b"VA":
-            size = int(parts[1])
-            flags = parts[2:]
-            value = self.stream.read(size)
+        if result.rc == b"VA":
+            if result.datalen is None:
+                raise MemcacheError("invalid response: missing datalen")
+            result.value = self.stream.read(result.datalen)
             self.stream.read(2)  # read the "\r\n"
-        return MetaResult(rc=rc, datalen=datalen, flags=flags, value=value)
+
+        return result
 
     def set(
         self, key: Union[bytes, str], value: Any, expire: Optional[int] = None

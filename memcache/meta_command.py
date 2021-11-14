@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import List, Optional, Union
+
+from .errors import MemcacheError
 
 
 @dataclass(init=False)
@@ -31,9 +35,7 @@ class MetaCommand:
             header = b" ".join([self.cm, self.key] + self.flags + [b"\r\n"])
         else:
             datalen = str(self.datalen).encode("utf-8")
-            header = b" ".join(
-                [self.cm, self.key, datalen] + self.flags + [b"\r\n"]
-            )
+            header = b" ".join([self.cm, self.key, datalen] + self.flags + [b"\r\n"])
         return header
 
 
@@ -43,3 +45,22 @@ class MetaResult:
     datalen: Optional[int]
     flags: List[bytes]
     value: Optional[bytes]
+
+    @staticmethod
+    def load_header(line: bytes) -> MetaResult:
+        parts = line.split()
+
+        rc = parts[0]
+        if rc == b"CLIENT_ERROR":
+            # Old ascii protocol error.
+            raise MemcacheError(line)
+
+        flags = []
+        datalen = None
+        if len(parts) > 1:
+            if str(parts[1][0]).isdigit():
+                datalen = int(parts[1])
+                flags = parts[2:]
+            else:
+                flags = parts[1:]
+        return MetaResult(rc=rc, datalen=datalen, flags=flags, value=None)
