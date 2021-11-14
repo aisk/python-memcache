@@ -47,14 +47,7 @@ class Connection:
             return self._execute_meta_command(command)
 
     def _execute_meta_command(self, command: MetaCommand) -> MetaResult:
-        if command.datalen is None:
-            header = b" ".join([command.cm, command.key] + command.flags + [b"\r\n"])
-        else:
-            datalen = str(command.datalen).encode("utf-8")
-            header = b" ".join(
-                [command.cm, command.key, datalen] + command.flags + [b"\r\n"]
-            )
-        self.stream.write(header)
+        self.stream.write(command.dump_header())
         if command.value:
             self.stream.write(command.value + b"\r\n")
         self.stream.flush()

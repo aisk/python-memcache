@@ -26,6 +26,16 @@ class MetaCommand:
         self.flags = flags or []
         self.value = value
 
+    def dump_header(self) -> bytes:
+        if self.datalen is None:
+            header = b" ".join([self.cm, self.key] + self.flags + [b"\r\n"])
+        else:
+            datalen = str(self.datalen).encode("utf-8")
+            header = b" ".join(
+                [self.cm, self.key, datalen] + self.flags + [b"\r\n"]
+            )
+        return header
+
 
 @dataclass
 class MetaResult:

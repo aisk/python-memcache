@@ -47,14 +47,7 @@ class AsyncConnection:
         if not self._connected:
             await self._connect()
 
-        if command.datalen is None:
-            header = b" ".join([command.cm, command.key] + command.flags + [b"\r\n"])
-        else:
-            datalen = str(command.datalen).encode("utf-8")
-            header = b" ".join(
-                [command.cm, command.key, datalen] + command.flags + [b"\r\n"]
-            )
-        self.writer.write(header)
+        self.writer.write(command.dump_header())
         if command.value:
             self.writer.write(command.value + b"\r\n")
         await self.writer.drain()
