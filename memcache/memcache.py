@@ -109,13 +109,13 @@ class Memcache:
     ):
         addr = addr or ("localhost", 11211)
         if isinstance(addr, list):
-            self._connections = hashring.HashRing([
-                Connection(x, load_func=load_func, dump_func=dump_func) for x in addr
-            ])
+            self._connections = hashring.HashRing(
+                [Connection(x, load_func=load_func, dump_func=dump_func) for x in addr]
+            )
         else:
-            self._connections = hashring.HashRing([
-                Connection(addr, load_func=load_func, dump_func=dump_func)
-            ])
+            self._connections = hashring.HashRing(
+                [Connection(addr, load_func=load_func, dump_func=dump_func)]
+            )
 
     def _get_connection(self, key) -> Connection:
         if isinstance(key, bytes):

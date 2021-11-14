@@ -106,14 +106,16 @@ class AsyncMemcache:
     ):
         addr = addr or ("localhost", 11211)
         if isinstance(addr, list):
-            self._connections = hashring.HashRing([
-                AsyncConnection(x, load_func=load_func, dump_func=dump_func)
-                for x in addr
-            ])
+            self._connections = hashring.HashRing(
+                [
+                    AsyncConnection(x, load_func=load_func, dump_func=dump_func)
+                    for x in addr
+                ]
+            )
         else:
-            self._connections = hashring.HashRing([
-                AsyncConnection(addr, load_func=load_func, dump_func=dump_func)
-            ])
+            self._connections = hashring.HashRing(
+                [AsyncConnection(addr, load_func=load_func, dump_func=dump_func)]
+            )
 
     def _get_connection(self, key) -> AsyncConnection:
         if isinstance(key, bytes):
