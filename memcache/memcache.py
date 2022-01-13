@@ -38,7 +38,7 @@ class Connection:
         self.stream.flush()
         response = self.stream.readline()
         if response != b"OK\r\n":
-            raise MemcacheError(response.removesuffix(NEWLINE))
+            raise MemcacheError(response.rstrip(NEWLINE))
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         try:
@@ -102,7 +102,7 @@ Addr = Tuple[str, int]
 class Memcache:
     def __init__(
         self,
-        addr: Union[Addr, List[Addr]] = None,
+        addr: Union[Addr, List[Addr], None] = None,
         *,
         load_func: LoadFunc = load,
         dump_func: DumpFunc = dump
@@ -117,10 +117,10 @@ class Memcache:
                 [Connection(addr, load_func=load_func, dump_func=dump_func)]
             )
 
-    def _get_connection(self, key) -> Connection:
+    def _get_connection(self, key: Union[str, bytes]) -> Connection:
         if isinstance(key, bytes):
             key = key.decode("utf-8")
-        return self._connections.get_node(key)
+        return self._connections.get_node(key)  # type: ignore[no-any-return]
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         return self._get_connection(command.key).execute_meta_command(command)

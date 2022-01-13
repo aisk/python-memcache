@@ -36,7 +36,7 @@ class AsyncConnection:
         await self.writer.drain()
         response = await self.reader.readline()
         if response != b"OK\r\n":
-            raise MemcacheError(response.removesuffix(b"\r\n"))
+            raise MemcacheError(response.rstrip(b"\r\n"))
 
     async def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         try:
@@ -99,7 +99,7 @@ class AsyncConnection:
 class AsyncMemcache:
     def __init__(
         self,
-        addr: Union[Addr, List[Addr]] = None,
+        addr: Union[Addr, List[Addr], None] = None,
         *,
         load_func: LoadFunc = load,
         dump_func: DumpFunc = dump
@@ -117,10 +117,10 @@ class AsyncMemcache:
                 [AsyncConnection(addr, load_func=load_func, dump_func=dump_func)]
             )
 
-    def _get_connection(self, key) -> AsyncConnection:
+    def _get_connection(self, key: Union[str, bytes]) -> AsyncConnection:
         if isinstance(key, bytes):
             key = key.decode("utf-8")
-        return self._connections.get_node(key)
+        return self._connections.get_node(key)  # type: ignore[no-any-return]
 
     async def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         return await self._get_connection(command.key).execute_meta_command(command)
