@@ -16,9 +16,9 @@ class MetaCommand:
         self,
         cm: bytes,
         key: Union[bytes, str],
-        datalen: int = None,
-        flags: List[bytes] = None,
-        value: bytes = None,
+        datalen: Optional[int] = None,
+        flags: Optional[List[bytes]] = None,
+        value: Optional[bytes] = None,
     ) -> None:
         if isinstance(key, str):
             key = key.encode()
