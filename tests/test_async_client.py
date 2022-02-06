@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -43,3 +44,18 @@ async def test_delete(client):
 async def test_flush_all(client):
     await client.flush_all()
     await client.flush_all()
+
+
+@pytest.mark.asyncio
+async def test_pool_timeout():
+    client = memcache.AsyncMemcache(pool_size=1, pool_timeout=1)
+
+    start = time.time()
+    async with client._get_connection("test"):
+        try:
+            async with client._get_connection("test"):
+                pass
+        except asyncio.TimeoutError:
+            assert time.time() - start > 1
+        else:
+            raise ValueError("empty not raised")

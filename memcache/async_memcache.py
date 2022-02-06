@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any, List, Tuple, Union, Optional
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Callable, List, Tuple, Union, Optional
 
 import hashring
 
@@ -96,46 +97,105 @@ class AsyncConnection:
         await self.execute_meta_command(command)
 
 
+class AsyncPool:
+    def __init__(
+        self,
+        create_connection: Callable[..., AsyncConnection],
+        max_size: Optional[int],
+        timeout: Optional[int],
+    ) -> None:
+        self._create_connection = create_connection
+        self._max_size = max_size
+        self._timeout = timeout
+        self._size = 0
+        self._lock = asyncio.Lock()
+        self._connections: asyncio.Queue[AsyncConnection] = asyncio.Queue()
+
+    @asynccontextmanager
+    async def get(self) -> AsyncIterator[AsyncConnection]:
+        try:
+            connection = self._connections.get_nowait()
+            yield connection
+            await self._connections.put(connection)
+        except asyncio.QueueEmpty:
+            if self._max_size and self._size >= self._max_size:
+                connection = await asyncio.wait_for(
+                    self._connections.get(), timeout=self._timeout
+                )
+                yield connection
+                await self._connections.put(connection)
+            else:
+                async with self._lock:
+                    self._size += 1
+                connection = self._create_connection()
+                yield connection
+                await self._connections.put(connection)
+
+
 class AsyncMemcache:
     def __init__(
         self,
         addr: Union[Addr, List[Addr], None] = None,
         *,
+        pool_size: Optional[int] = 23,
+        pool_timeout: Optional[int] = 1,
         load_func: LoadFunc = load,
         dump_func: DumpFunc = dump
     ):
         addr = addr or ("localhost", 11211)
         if isinstance(addr, list):
+            addrs: List[Addr] = addr
+            nodes: List[AsyncPool] = []
+            for addr in addrs:
+                create_connection = lambda: AsyncConnection(
+                    addr, load_func=load_func, dump_func=dump_func
+                )
+                nodes.append(
+                    AsyncPool(
+                        create_connection, max_size=pool_size, timeout=pool_timeout
+                    )
+                )
+            self._connections = hashring.HashRing(nodes)
+        elif isinstance(addr, tuple):
+            a: Addr = addr
+            create_connection = lambda: AsyncConnection(
+                a, load_func=load_func, dump_func=dump_func
+            )
             self._connections = hashring.HashRing(
-                [
-                    AsyncConnection(x, load_func=load_func, dump_func=dump_func)
-                    for x in addr
-                ]
+                [AsyncPool(create_connection, max_size=pool_size, timeout=pool_timeout)]
             )
         else:
-            self._connections = hashring.HashRing(
-                [AsyncConnection(addr, load_func=load_func, dump_func=dump_func)]
-            )
+            raise TypeError("invalid type for addr")
 
-    def _get_connection(self, key: Union[str, bytes]) -> AsyncConnection:
+    @asynccontextmanager
+    async def _get_connection(
+        self, key: Union[str, bytes]
+    ) -> AsyncIterator[AsyncConnection]:
         if isinstance(key, bytes):
             key = key.decode("utf-8")
-        return self._connections.get_node(key)  # type: ignore[no-any-return]
+        pool = self._connections.get_node(key)
+        async with pool.get() as connection:
+            yield connection
 
     async def execute_meta_command(self, command: MetaCommand) -> MetaResult:
-        return await self._get_connection(command.key).execute_meta_command(command)
+        async with self._get_connection(command.key) as connection:
+            return await connection.execute_meta_command(command)
 
     async def flush_all(self) -> None:
-        for connection in self._connections.nodes:
-            await connection.flush_all()
+        for pool in self._connections.nodes:
+            async with pool.get() as connection:
+                await connection.flush_all()
 
     async def set(
         self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> None:
-        return await self._get_connection(key).set(key, value, expire=expire)
+        async with self._get_connection(key) as connection:
+            return await connection.set(key, value, expire=expire)
 
     async def get(self, key: Union[bytes, str]) -> Optional[Any]:
-        return await self._get_connection(key).get(key)
+        async with self._get_connection(key) as connection:
+            return await connection.get(key)
 
     async def delete(self, key: Union[bytes, str]) -> None:
-        return await self._get_connection(key).delete(key)
+        async with self._get_connection(key) as connection:
+            return await connection.delete(key)
