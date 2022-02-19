@@ -1,5 +1,5 @@
-memcache
-========
+Memcache Client for Python
+==========================
 
 Experimental memcached client library for python. This project is in WIP status, please don't use it in production environment.
 
