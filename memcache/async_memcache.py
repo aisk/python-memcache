@@ -16,18 +16,38 @@ class AsyncConnection:
         addr: Tuple[str, int],
         *,
         load_func: LoadFunc = load,
-        dump_func: DumpFunc = dump
+        dump_func: DumpFunc = dump,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
     ):
         self._addr = addr
         self._load = load_func
         self._dump = dump_func
+        self._username = username
+        self._password = password
         self._connected = False
 
     async def _connect(self) -> None:
         self.reader, self.writer = await asyncio.open_connection(
             self._addr[0], self._addr[1]
         )
+        await self._auth()
         self._connected = True
+
+    async def _auth(self) -> None:
+        if self._username is None or self._password is None:
+            return
+        auth_data = b"%s %s" % (
+            self._username.encode("utf-8"),
+            self._password.encode("utf-8"),
+        )
+        self.writer.write(b"set auth x 0 %d\r\n" % len(auth_data))
+        self.writer.write(auth_data)
+        self.writer.write(b"\r\n")
+        await self.writer.drain()
+        response = await self.reader.readline()
+        if response != b"STORED\r\n":
+            raise MemcacheError(response.rstrip(b"\r\n"))
 
     async def flush_all(self) -> None:
         if not self._connected:
@@ -140,7 +160,9 @@ class AsyncMemcache:
         pool_size: Optional[int] = 23,
         pool_timeout: Optional[int] = 1,
         load_func: LoadFunc = load,
-        dump_func: DumpFunc = dump
+        dump_func: DumpFunc = dump,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
     ):
         addr = addr or ("localhost", 11211)
         if isinstance(addr, list):
@@ -148,7 +170,11 @@ class AsyncMemcache:
             nodes: List[AsyncPool] = []
             for addr in addrs:
                 create_connection = lambda: AsyncConnection(
-                    addr, load_func=load_func, dump_func=dump_func
+                    addr,
+                    load_func=load_func,
+                    dump_func=dump_func,
+                    username=username,
+                    password=password,
                 )
                 nodes.append(
                     AsyncPool(
@@ -159,7 +185,11 @@ class AsyncMemcache:
         elif isinstance(addr, tuple):
             a: Addr = addr
             create_connection = lambda: AsyncConnection(
-                a, load_func=load_func, dump_func=dump_func
+                a,
+                load_func=load_func,
+                dump_func=dump_func,
+                username=username,
+                password=password,
             )
             self._connections = hashring.HashRing(
                 [AsyncPool(create_connection, max_size=pool_size, timeout=pool_timeout)]

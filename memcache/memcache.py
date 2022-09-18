@@ -20,17 +20,37 @@ class Connection:
         addr: Tuple[str, int],
         *,
         load_func: LoadFunc = load,
-        dump_func: DumpFunc = dump
+        dump_func: DumpFunc = dump,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
     ):
         self._addr = addr
         self._load = load_func
         self._dump = dump_func
+        self._username = username
+        self._password = password
         self._connect()
 
     def _connect(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.connect(self._addr)
         self.stream = self.socket.makefile(mode="rwb")
+        self._auth()
+
+    def _auth(self) -> None:
+        if self._username is None or self._password is None:
+            return
+        auth_data = b"%s %s" % (
+            self._username.encode("utf-8"),
+            self._password.encode("utf-8"),
+        )
+        self.stream.write(b"set auth x 0 %d\r\n" % len(auth_data))
+        self.stream.write(auth_data)
+        self.stream.write(b"\r\n")
+        self.stream.flush()
+        response = self.stream.readline()
+        if response != b"STORED\r\n":
+            raise MemcacheError(response.rstrip(NEWLINE))
 
     def close(self) -> None:
         self.stream.close()
@@ -143,7 +163,9 @@ class Memcache:
         pool_size: Optional[int] = 23,
         pool_timeout: Optional[int] = 1,
         load_func: LoadFunc = load,
-        dump_func: DumpFunc = dump
+        dump_func: DumpFunc = dump,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
     ):
         addr = addr or ("localhost", 11211)
         if isinstance(addr, list):
@@ -151,7 +173,11 @@ class Memcache:
             nodes: List[Pool] = []
             for addr in addrs:
                 create_connection = lambda: Connection(
-                    addr, load_func=load_func, dump_func=dump_func
+                    addr,
+                    load_func=load_func,
+                    dump_func=dump_func,
+                    username=username,
+                    password=password,
                 )
                 nodes.append(
                     Pool(create_connection, max_size=pool_size, timeout=pool_timeout)
@@ -160,7 +186,11 @@ class Memcache:
         elif isinstance(addr, tuple):
             a: Addr = addr
             create_connection = lambda: Connection(
-                a, load_func=load_func, dump_func=dump_func
+                a,
+                load_func=load_func,
+                dump_func=dump_func,
+                username=username,
+                password=password,
             )
             self._connections = hashring.HashRing(
                 [Pool(create_connection, max_size=pool_size, timeout=pool_timeout)]
