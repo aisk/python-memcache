@@ -51,7 +51,7 @@ class MetaResult:
         rc = parts[0]
         if rc == b"CLIENT_ERROR":
             # Old ascii protocol error.
-            raise MemcacheError(line)
+            raise MemcacheError(line.removeprefix(b"CLIENT_ERROR ").removesuffix(b"\r\n").decode("utf-8"))
 
         flags = []
         datalen = None
