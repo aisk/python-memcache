@@ -153,6 +153,32 @@ class AsyncPool:
 
 
 class AsyncMemcache:
+    """
+    Async Memcache client.
+
+    :param addr: memcached server addresses to be connected.
+
+      The address can be a two elements tuple, as ``(ip, port)`` format.
+
+      The address can be None, thus the default server ``("localhost", 11211)`` should
+      be used.
+
+      The address can be a list of tuple, like ``[("192.168.1.10", 11211),
+      ("192.168.1.11", 11211)]``. In this situation, the keys will be hashed to one
+      of those servers by consistent hash algorithm.
+    :param pool_size: The connection pool size. This size will be used as the max
+      number to keep the connections for future uses.
+    :param pool_timeout: If the there is no available connection in the pool, and the
+      ``pool_size`` is reached, wait the specified time to get an available connection,
+      or a `asyncio.TimeoutError` is raised.
+    :param load_func: Function to load the bytes content from memcached to python
+      values.
+    :param dump_func: Function to dump the python values to bytes content to store in
+      memcached.
+    :param username: Memcached ASCII protocol authentication username.
+    :param password: Memcached ASCII protocol authentication password.
+    """
+
     def __init__(
         self,
         addr: Union[Addr, List[Addr], None] = None,
