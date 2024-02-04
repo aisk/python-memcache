@@ -181,6 +181,7 @@ class Memcache:
     :param username: Memcached ASCII protocol authentication username.
     :param password: Memcached ASCII protocol authentication password.
     """
+
     def __init__(
         self,
         addr: Union[Addr, List[Addr], None] = None,
@@ -197,26 +198,32 @@ class Memcache:
             addrs: List[Addr] = addr
             nodes: List[Pool] = []
             for addr in addrs:
-                create_connection = lambda: Connection(
-                    addr,
-                    load_func=load_func,
-                    dump_func=dump_func,
-                    username=username,
-                    password=password,
-                )
+
+                def create_connection():
+                    return Connection(
+                        addr,
+                        load_func=load_func,
+                        dump_func=dump_func,
+                        username=username,
+                        password=password,
+                    )
+
                 nodes.append(
                     Pool(create_connection, max_size=pool_size, timeout=pool_timeout)
                 )
             self._connections = hashring.HashRing(nodes)
         elif isinstance(addr, tuple):
             a: Addr = addr
-            create_connection = lambda: Connection(
-                a,
-                load_func=load_func,
-                dump_func=dump_func,
-                username=username,
-                password=password,
-            )
+
+            def create_connection():
+                return Connection(
+                    a,
+                    load_func=load_func,
+                    dump_func=dump_func,
+                    username=username,
+                    password=password,
+                )
+
             self._connections = hashring.HashRing(
                 [Pool(create_connection, max_size=pool_size, timeout=pool_timeout)]
             )

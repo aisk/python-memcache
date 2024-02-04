@@ -195,13 +195,16 @@ class AsyncMemcache:
             addrs: List[Addr] = addr
             nodes: List[AsyncPool] = []
             for addr in addrs:
-                create_connection = lambda: AsyncConnection(
-                    addr,
-                    load_func=load_func,
-                    dump_func=dump_func,
-                    username=username,
-                    password=password,
-                )
+
+                def create_connection():
+                    return AsyncConnection(
+                        addr,
+                        load_func=load_func,
+                        dump_func=dump_func,
+                        username=username,
+                        password=password,
+                    )
+
                 nodes.append(
                     AsyncPool(
                         create_connection, max_size=pool_size, timeout=pool_timeout
@@ -210,13 +213,16 @@ class AsyncMemcache:
             self._connections = hashring.HashRing(nodes)
         elif isinstance(addr, tuple):
             a: Addr = addr
-            create_connection = lambda: AsyncConnection(
-                a,
-                load_func=load_func,
-                dump_func=dump_func,
-                username=username,
-                password=password,
-            )
+
+            def create_connection():
+                return AsyncConnection(
+                    a,
+                    load_func=load_func,
+                    dump_func=dump_func,
+                    username=username,
+                    password=password,
+                )
+
             self._connections = hashring.HashRing(
                 [AsyncPool(create_connection, max_size=pool_size, timeout=pool_timeout)]
             )

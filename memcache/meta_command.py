@@ -51,11 +51,7 @@ class MetaResult:
         rc = parts[0]
         if rc == b"CLIENT_ERROR":
             # Old ascii protocol error.
-            raise MemcacheError(
-                line.lstrip(b"CLIENT_ERROR ")
-                .rstrip()
-                .decode("utf-8")
-            )
+            raise MemcacheError(line.lstrip(b"CLIENT_ERROR ").rstrip().decode("utf-8"))
 
         flags = []
         datalen = None
