@@ -5,11 +5,9 @@ from typing import Any, AsyncIterator, Callable, List, Tuple, Union, Optional
 import hashring
 
 from .errors import MemcacheError
+from .memcache import Addr
 from .meta_command import MetaCommand, MetaResult
 from .serialize import dump, load, DumpFunc, LoadFunc
-
-
-Addr = Tuple[str, int]
 
 
 class AsyncConnection:
