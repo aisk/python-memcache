@@ -1,9 +1,9 @@
 [tool.poetry]
 name = "memcache"
-version = "0.12.0"
+version = "0.13.0"
 description = "Memcached client for Python"
 readme = "README.md"
-authors = ["An Long <aisk1988@gmail.com>"]
+authors = ["AN Long <aisk1988@gmail.com>"]
 
 [tool.poetry.dependencies]
 python = "^3.7"
