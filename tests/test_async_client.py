@@ -59,3 +59,55 @@ async def test_pool_timeout():
             assert time.time() - start > 1
         else:
             raise ValueError("empty not raised")
+
+
+@pytest.mark.asyncio
+async def test_gets(client):
+    await client.set("test_key", "test_value")
+    result = await client.gets("test_key")
+    assert result is not None
+    value, cas_token = result
+    assert value == "test_value"
+    assert isinstance(cas_token, int)
+    assert cas_token > 0
+
+
+@pytest.mark.asyncio
+async def test_gets_missing_key(client):
+    await client.delete("nonexistent_key")
+    assert await client.gets("nonexistent_key") is None
+
+
+@pytest.mark.asyncio
+async def test_cas_success(client):
+    await client.set("cas_key", "initial_value")
+    _, cas_token = await client.gets("cas_key")
+
+    await client.cas("cas_key", "updated_value", cas_token)
+    assert await client.get("cas_key") == "updated_value"
+
+
+@pytest.mark.asyncio
+async def test_cas_failure(client):
+    await client.set("cas_key", "initial_value")
+    _, cas_token = await client.gets("cas_key")
+
+    # Modify the value outside of CAS
+    await client.set("cas_key", "modified_value")
+
+    # CAS should fail with old token
+    with pytest.raises(memcache.MemcacheError):
+        await client.cas("cas_key", "updated_value", cas_token)
+    assert await client.get("cas_key") == "modified_value"
+
+
+@pytest.mark.asyncio
+async def test_cas_with_expire(client):
+    await client.set("cas_expire_key", "initial_value")
+    _, cas_token = await client.gets("cas_expire_key")
+
+    await client.cas("cas_expire_key", "updated_value", cas_token, expire=1)
+    assert await client.get("cas_expire_key") == "updated_value"
+
+    await asyncio.sleep(1.1)
+    assert await client.get("cas_expire_key") is None

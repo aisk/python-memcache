@@ -55,3 +55,50 @@ def test_pool_timeout():
             assert time.time() - start > 1
         else:
             raise ValueError("empty not raised")
+
+
+def test_gets(client):
+    client.set("test_key", "test_value")
+    result = client.gets("test_key")
+    assert result is not None
+    value, cas_token = result
+    assert value == "test_value"
+    assert isinstance(cas_token, int)
+    assert cas_token > 0
+
+
+def test_gets_missing_key(client):
+    client.delete("nonexistent_key")
+    assert client.gets("nonexistent_key") is None
+
+
+def test_cas_success(client):
+    client.set("cas_key", "initial_value")
+    _, cas_token = client.gets("cas_key")
+
+    client.cas("cas_key", "updated_value", cas_token)
+    assert client.get("cas_key") == "updated_value"
+
+
+def test_cas_failure(client):
+    client.set("cas_key", "initial_value")
+    _, cas_token = client.gets("cas_key")
+
+    # Modify the value outside of CAS
+    client.set("cas_key", "modified_value")
+
+    # CAS should fail with old token
+    with pytest.raises(memcache.MemcacheError):
+        client.cas("cas_key", "updated_value", cas_token)
+    assert client.get("cas_key") == "modified_value"
+
+
+def test_cas_with_expire(client):
+    client.set("cas_expire_key", "initial_value")
+    _, cas_token = client.gets("cas_expire_key")
+
+    client.cas("cas_expire_key", "updated_value", cas_token, expire=1)
+    assert client.get("cas_expire_key") == "updated_value"
+
+    time.sleep(1.1)
+    assert client.get("cas_expire_key") is None

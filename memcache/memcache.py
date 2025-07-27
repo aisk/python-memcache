@@ -103,6 +103,37 @@ class Connection:
         )
         self.execute_meta_command(command)
 
+    def cas(
+        self,
+        key: Union[bytes, str],
+        value: Any,
+        cas_token: int,
+        *,
+        expire: Optional[int] = None,
+    ) -> None:
+        """
+        Store a value using compare-and-swap operation.
+
+        :param key: The key to store
+        :param value: The value to store
+        :param cas_token: The CAS token from a previous gets operation
+        :param expire: Optional expiration time in seconds
+        :raises MemcacheError: If the CAS token doesn't match or other error occurs
+        """
+        value, client_flags = self._dump(key, value)
+
+        flags = [b"F%d" % client_flags, b"C%d" % cas_token]
+        if expire:
+            flags.append(b"T%d" % expire)
+
+        command = MetaCommand(
+            cm=b"ms", key=key, datalen=len(value), flags=flags, value=value
+        )
+        result = self.execute_meta_command(command)
+
+        if result.rc != b"HD":
+            raise MemcacheError("CAS operation failed: token mismatch or other error")
+
     def get(self, key: Union[bytes, str]) -> Optional[Any]:
         command = MetaCommand(cm=b"mg", key=key, flags=[b"v", b"f"])
         result = self.execute_meta_command(command)
@@ -113,6 +144,34 @@ class Connection:
         client_flags = int(result.flags[0][1:])
 
         return self._load(key, result.value, client_flags)
+
+    def gets(self, key: Union[bytes, str]) -> Optional[Tuple[Any, int]]:
+        """
+        Get a value and its CAS token from memcached.
+
+        :param key: The key to retrieve
+        :return: A tuple of (value, cas_token) or None if key doesn't exist
+        """
+        command = MetaCommand(cm=b"mg", key=key, flags=[b"v", b"f", b"c"])
+        result = self.execute_meta_command(command)
+
+        if result.value is None:
+            return None
+
+        client_flags = int(result.flags[0][1:])
+        value = self._load(key, result.value, client_flags)
+
+        # Find CAS token in flags
+        cas_token = None
+        for flag in result.flags[1:]:  # Skip the first flag (client_flags)
+            if flag.startswith(b"c"):
+                cas_token = int(flag[1:])
+                break
+
+        if cas_token is None:
+            raise MemcacheError("CAS token not found in response")
+
+        return value, cas_token
 
     def delete(self, key: Union[bytes, str]) -> None:
         command = MetaCommand(cm=b"md", key=key, flags=[], value=None)
@@ -181,6 +240,7 @@ class Memcache:
     :param username: Memcached ASCII protocol authentication username.
     :param password: Memcached ASCII protocol authentication password.
     """
+
     def __init__(
         self,
         addr: Union[Addr, List[Addr], None] = None,
@@ -249,6 +309,36 @@ class Memcache:
     def get(self, key: Union[bytes, str]) -> Optional[Any]:
         with self._get_connection(key) as connection:
             return connection.get(key)
+
+    def gets(self, key: Union[bytes, str]) -> Optional[Tuple[Any, int]]:
+        """
+        Get a value and its CAS token from memcached.
+
+        :param key: The key to retrieve
+        :return: A tuple of (value, cas_token) or None if key doesn't exist
+        """
+        with self._get_connection(key) as connection:
+            return connection.gets(key)
+
+    def cas(
+        self,
+        key: Union[bytes, str],
+        value: Any,
+        cas_token: int,
+        *,
+        expire: Optional[int] = None,
+    ) -> None:
+        """
+        Store a value using compare-and-swap operation.
+
+        :param key: The key to store
+        :param value: The value to store
+        :param cas_token: The CAS token from a previous gets operation
+        :param expire: Optional expiration time in seconds
+        :raises MemcacheError: If the CAS token doesn't match or other error occurs
+        """
+        with self._get_connection(key) as connection:
+            connection.cas(key, value, cas_token, expire=expire)
 
     def delete(self, key: Union[bytes, str]) -> None:
         with self._get_connection(key) as connection:
