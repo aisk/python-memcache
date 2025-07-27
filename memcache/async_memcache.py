@@ -101,6 +101,37 @@ class AsyncConnection:
         )
         await self.execute_meta_command(command)
 
+    async def cas(
+        self,
+        key: Union[bytes, str],
+        value: Any,
+        cas_token: int,
+        *,
+        expire: Optional[int] = None,
+    ) -> None:
+        """
+        Store a value using compare-and-swap operation.
+
+        :param key: The key to store
+        :param value: The value to store
+        :param cas_token: The CAS token from a previous gets operation
+        :param expire: Optional expiration time in seconds
+        :raises MemcacheError: If the CAS token doesn't match or other error occurs
+        """
+        value, client_flags = self._dump(key, value)
+
+        flags = [b"F%d" % client_flags, b"C%d" % cas_token]
+        if expire:
+            flags.append(b"T%d" % expire)
+
+        command = MetaCommand(
+            cm=b"ms", key=key, datalen=len(value), flags=flags, value=value
+        )
+        result = await self.execute_meta_command(command)
+
+        if result.rc != b"HD":
+            raise MemcacheError("CAS operation failed: token mismatch or other error")
+
     async def get(self, key: Union[bytes, str]) -> Optional[Any]:
         command = MetaCommand(cm=b"mg", key=key, flags=[b"v", b"f"])
         result = await self.execute_meta_command(command)
@@ -111,6 +142,34 @@ class AsyncConnection:
         client_flags = int(result.flags[0][1:])
 
         return self._load(key, result.value, client_flags)
+
+    async def gets(self, key: Union[bytes, str]) -> Optional[Tuple[Any, int]]:
+        """
+        Get a value and its CAS token from memcached.
+
+        :param key: The key to retrieve
+        :return: A tuple of (value, cas_token) or None if key doesn't exist
+        """
+        command = MetaCommand(cm=b"mg", key=key, flags=[b"v", b"f", b"c"])
+        result = await self.execute_meta_command(command)
+
+        if result.value is None:
+            return None
+
+        client_flags = int(result.flags[0][1:])
+        value = self._load(key, result.value, client_flags)
+
+        # Find CAS token in flags
+        cas_token = None
+        for flag in result.flags[1:]:  # Skip the first flag (client_flags)
+            if flag.startswith(b"c"):
+                cas_token = int(flag[1:])
+                break
+
+        if cas_token is None:
+            raise MemcacheError("CAS token not found in response")
+
+        return value, cas_token
 
     async def delete(self, key: Union[bytes, str]) -> None:
         command = MetaCommand(cm=b"md", key=key, flags=[], value=None)
@@ -251,6 +310,36 @@ class AsyncMemcache:
     async def get(self, key: Union[bytes, str]) -> Optional[Any]:
         async with self._get_connection(key) as connection:
             return await connection.get(key)
+
+    async def gets(self, key: Union[bytes, str]) -> Optional[Tuple[Any, int]]:
+        """
+        Get a value and its CAS token from memcached.
+
+        :param key: The key to retrieve
+        :return: A tuple of (value, cas_token) or None if key doesn't exist
+        """
+        async with self._get_connection(key) as connection:
+            return await connection.gets(key)
+
+    async def cas(
+        self,
+        key: Union[bytes, str],
+        value: Any,
+        cas_token: int,
+        *,
+        expire: Optional[int] = None,
+    ) -> None:
+        """
+        Store a value using compare-and-swap operation.
+
+        :param key: The key to store
+        :param value: The value to store
+        :param cas_token: The CAS token from a previous gets operation
+        :param expire: Optional expiration time in seconds
+        :raises MemcacheError: If the CAS token doesn't match or other error occurs
+        """
+        async with self._get_connection(key) as connection:
+            await connection.cas(key, value, cas_token, expire=expire)
 
     async def delete(self, key: Union[bytes, str]) -> None:
         async with self._get_connection(key) as connection:
