@@ -22,6 +22,7 @@ dev = [
     "types-dataclasses>=0.6.0 ; python_version >= '3.6' and python_version < '3.7'",
     "anyio[trio]>=3.0.0,<4.0.0",
     "pytest-trio",
+    "trio-typing>=0.10.0 ; python_version >= '3.8'",
 ]
 
 [build-system]
