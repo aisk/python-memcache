@@ -5,7 +5,7 @@ description = "Memcached client for Python"
 authors = [{ name = "AN Long", email = "aisk1988@gmail.com" }]
 requires-python = ">=3.7"
 readme = "README.md"
-dependencies = ["hashring>=1.5.1,<2"]
+dependencies = ["hashring>=1.5.1,<2", "anyio>=3.0.0,<4.0.0"]
 
 [dependency-groups]
 dev = [
@@ -20,6 +20,9 @@ dev = [
     "pytest-asyncio>=0.23.0 ; python_version >= '3.8'",
     "pytest-asyncio>=0.15.0,<0.23.0 ; python_version < '3.8'",
     "types-dataclasses>=0.6.0 ; python_version >= '3.6' and python_version < '3.7'",
+    "anyio[trio]>=3.0.0,<4.0.0",
+    "pytest-trio",
+    "trio-typing>=0.10.0 ; python_version >= '3.8'",
 ]
 
 [build-system]

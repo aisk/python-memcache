@@ -2,7 +2,9 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, List, Tuple, Union, Optional
 
+import anyio
 import hashring
+from anyio.streams.buffered import BufferedByteReceiveStream
 
 from .errors import MemcacheError
 from .memcache import Addr
@@ -28,9 +30,8 @@ class AsyncConnection:
         self._connected = False
 
     async def _connect(self) -> None:
-        self.reader, self.writer = await asyncio.open_connection(
-            self._addr[0], self._addr[1]
-        )
+        self.writer = await anyio.connect_tcp(self._addr[0], self._addr[1])
+        self.reader = BufferedByteReceiveStream(self.writer)
         await self._auth()
         self._connected = True
 
@@ -41,23 +42,21 @@ class AsyncConnection:
             self._username.encode("utf-8"),
             self._password.encode("utf-8"),
         )
-        self.writer.write(b"set auth x 0 %d\r\n" % len(auth_data))
-        self.writer.write(auth_data)
-        self.writer.write(b"\r\n")
-        await self.writer.drain()
-        response = await self.reader.readline()
-        if response != b"STORED\r\n":
-            raise MemcacheError(response.rstrip(b"\r\n"))
+        await self.writer.send(b"set auth x 0 %d\r\n" % len(auth_data))
+        await self.writer.send(auth_data)
+        await self.writer.send(b"\r\n")
+        response = await self.reader.receive_until(b"\r\n", max_bytes=1024)
+        if response != b"STORED":
+            raise MemcacheError(response)
 
     async def flush_all(self) -> None:
         if not self._connected:
             await self._connect()
 
-        self.writer.write(b"flush_all\r\n")
-        await self.writer.drain()
-        response = await self.reader.readline()
-        if response != b"OK\r\n":
-            raise MemcacheError(response.rstrip(b"\r\n"))
+        await self.writer.send(b"flush_all\r\n")
+        response = await self.reader.receive_until(b"\r\n", max_bytes=1024)
+        if response != b"OK":
+            raise MemcacheError(response)
 
     async def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         try:
@@ -70,20 +69,20 @@ class AsyncConnection:
         if not self._connected:
             await self._connect()
 
-        self.writer.write(command.dump_header())
+        await self.writer.send(command.dump_header())
         if command.value:
-            self.writer.write(command.value + b"\r\n")
-        await self.writer.drain()
+            await self.writer.send(command.value + b"\r\n")
         return await self._receive_meta_result()
 
     async def _receive_meta_result(self) -> MetaResult:
-        result = MetaResult.load_header(await self.reader.readline())
+        header_line = await self.reader.receive_until(b"\r\n", max_bytes=1024)
+        result = MetaResult.load_header(header_line)
 
         if result.rc == b"VA":
             if result.datalen is None:
                 raise MemcacheError("invalid response: missing datalen")
-            result.value = await self.reader.read(result.datalen)
-            await self.reader.read(2)  # read the "\r\n"
+            result.value = await self.reader.receive_exactly(result.datalen)
+            await self.reader.receive_exactly(2)  # read the "\r\n"
 
         return result
 
