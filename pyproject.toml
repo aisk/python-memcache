@@ -9,12 +9,17 @@ dependencies = ["hashring>=1.5.1,<2"]
 
 [dependency-groups]
 dev = [
-    "flake8>=3.8.4,<4",
-    "black~=20.8b1",
-    "mypy>=0.930,<0.931",
-    "pytest>=6.2.1,<7",
-    "pytest-asyncio>=0.15.1,<0.16",
-    "types-dataclasses>=0.6,<0.7 ; python_version >= '3.6' and python_version < '3.7'",
+    "flake8>=7.0.0 ; python_version >= '3.9'",
+    "flake8>=5.0.0,<6.0.0 ; python_version < '3.9'",
+    "black>=24.0.0 ; python_version >= '3.8'",
+    "black>=23.0.0,<24.0.0 ; python_version < '3.8'",
+    "mypy>=1.10.0 ; python_version >= '3.8'",
+    "mypy>=0.991,<1.10.0 ; python_version < '3.8'",
+    "pytest>=8.0.0 ; python_version >= '3.8'",
+    "pytest>=7.0.0,<8.0.0 ; python_version < '3.8'",
+    "pytest-asyncio>=0.23.0 ; python_version >= '3.8'",
+    "pytest-asyncio>=0.15.0,<0.23.0 ; python_version < '3.8'",
+    "types-dataclasses>=0.6.0 ; python_version >= '3.6' and python_version < '3.7'",
 ]
 
 [build-system]
