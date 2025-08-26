@@ -1,22 +1,27 @@
-[tool.poetry]
+[project]
 name = "memcache"
 version = "0.13.0"
 description = "Memcached client for Python"
+authors = [{ name = "AN Long", email = "aisk1988@gmail.com" }]
+requires-python = ">=3.7"
 readme = "README.md"
-authors = ["AN Long <aisk1988@gmail.com>"]
+dependencies = ["hashring>=1.5.1,<2"]
 
-[tool.poetry.dependencies]
-python = "^3.7"
-hashring = "^1.5.1"
-
-[tool.poetry.dev-dependencies]
-flake8 = "^3.8.4"
-black = "^20.8b1"
-mypy = "^0.930"
-pytest = "^6.2.1"
-pytest-asyncio = "^0.15.1"
-types-dataclasses = { version = "^0.6", python = "~3.6" }
+[dependency-groups]
+dev = [
+    "flake8>=7.0.0 ; python_version >= '3.9'",
+    "flake8>=5.0.0,<6.0.0 ; python_version < '3.9'",
+    "black>=24.0.0 ; python_version >= '3.8'",
+    "black>=23.0.0,<24.0.0 ; python_version < '3.8'",
+    "mypy>=1.10.0 ; python_version >= '3.8'",
+    "mypy>=0.991,<1.10.0 ; python_version < '3.8'",
+    "pytest>=8.0.0 ; python_version >= '3.8'",
+    "pytest>=7.0.0,<8.0.0 ; python_version < '3.8'",
+    "pytest-asyncio>=0.23.0 ; python_version >= '3.8'",
+    "pytest-asyncio>=0.15.0,<0.23.0 ; python_version < '3.8'",
+    "types-dataclasses>=0.6.0 ; python_version >= '3.6' and python_version < '3.7'",
+]
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
