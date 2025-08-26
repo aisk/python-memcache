@@ -1,6 +1,6 @@
 [project]
 name = "memcache"
-version = "0.13.0"
+version = "0.14.0b1"
 description = "Memcached client for Python"
 authors = [{ name = "AN Long", email = "aisk1988@gmail.com" }]
 requires-python = ">=3.7"
