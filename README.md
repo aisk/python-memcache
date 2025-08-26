@@ -5,6 +5,7 @@ Memcached client library for Python.
 Key features:
 
 - Based on memcached's new meta commands;
+- Synchronous and asynchronous APIs;
 - Asyncio and Trio support (via anyio);
 - Type hints.
 
