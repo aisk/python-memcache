@@ -1,11 +1,11 @@
 # memcache
 
-Experimental memcached client library for python. This project is in WIP status, please don't use it in production environment.
+Memcached client library for Python.
 
 Key features:
 
 - Based on memcached's new meta commands;
-- Asyncio support;
+- Asyncio and Trio support (via anyio);
 - Type hints.
 
 ## Installation
@@ -16,7 +16,7 @@ $ pip install memcache
 
 ## About the Project
 
-Memcache is &copy; 2020-2021 by [aisk](https://github.com/aisk).
+Memcache is &copy; 2020-2025 by [aisk](https://github.com/aisk).
 
 ### License
 
