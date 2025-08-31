@@ -177,6 +177,34 @@ class Connection:
         command = MetaCommand(cm=b"md", key=key, flags=[], value=None)
         self.execute_meta_command(command)
 
+    def incr(self, key: Union[bytes, str], value: int = 1) -> int:
+        command = MetaCommand(
+            cm=b"ma", key=key, flags=[b"D%d" % value, b"v"]
+        )
+        result = self.execute_meta_command(command)
+
+        if result.rc != b"VA":
+            raise MemcacheError(f"INCR operation failed: {result.rc.decode()}")
+
+        if result.value is None:
+            raise MemcacheError("INCR operation failed: no value returned")
+
+        return int(result.value)
+
+    def decr(self, key: Union[bytes, str], value: int = 1) -> int:
+        command = MetaCommand(
+            cm=b"ma", key=key, flags=[b"D%d" % value, b"MD", b"v"]
+        )
+        result = self.execute_meta_command(command)
+
+        if result.rc != b"VA":
+            raise MemcacheError(f"DECR operation failed: {result.rc.decode()}")
+
+        if result.value is None:
+            raise MemcacheError("DECR operation failed: no value returned")
+
+        return int(result.value)
+
 
 Addr = Tuple[str, int]
 
@@ -343,3 +371,11 @@ class Memcache:
     def delete(self, key: Union[bytes, str]) -> None:
         with self._get_connection(key) as connection:
             return connection.delete(key)
+
+    def incr(self, key: Union[bytes, str], value: int = 1) -> int:
+        with self._get_connection(key) as connection:
+            return connection.incr(key, value)
+
+    def decr(self, key: Union[bytes, str], value: int = 1) -> int:
+        with self._get_connection(key) as connection:
+            return connection.decr(key, value)

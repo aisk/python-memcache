@@ -102,3 +102,58 @@ def test_cas_with_expire(client):
 
     time.sleep(1.1)
     assert client.get("cas_expire_key") is None
+
+
+def test_incr(client):
+    client.set("counter", 10)
+    result = client.incr("counter")
+    assert result == 11
+    assert client.get("counter") == 11
+
+
+def test_incr_with_value(client):
+    client.set("counter", 5)
+    result = client.incr("counter", 3)
+    assert result == 8
+    assert client.get("counter") == 8
+
+
+def test_decr(client):
+    client.set("counter", 10)
+    result = client.decr("counter")
+    assert result == 9
+    assert client.get("counter") == 9
+
+
+def test_decr_with_value(client):
+    client.set("counter", 10)
+    result = client.decr("counter", 3)
+    assert result == 7
+    assert client.get("counter") == 7
+
+
+def test_incr_decr_combined(client):
+    client.set("counter", 100)
+    
+    # Increment multiple times
+    assert client.incr("counter", 10) == 110
+    assert client.incr("counter", 5) == 115
+    
+    # Decrement multiple times
+    assert client.decr("counter", 3) == 112
+    assert client.decr("counter") == 111
+    
+    # Final value
+    assert client.get("counter") == 111
+
+
+def test_incr_missing_key(client):
+    client.delete("nonexistent_counter")
+    with pytest.raises(memcache.MemcacheError):
+        client.incr("nonexistent_counter")
+
+
+def test_decr_missing_key(client):
+    client.delete("nonexistent_counter")
+    with pytest.raises(memcache.MemcacheError):
+        client.decr("nonexistent_counter")
