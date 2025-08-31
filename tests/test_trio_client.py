@@ -129,3 +129,54 @@ async def test_trio_cas_failure(client):
     with pytest.raises(memcache.MemcacheError):
         await client.cas("cas_key", "updated_value", cas_token)
     assert await client.get("cas_key") == "modified_value"
+
+
+@pytest.mark.trio
+async def test_trio_incr(client):
+    """Test trio increment operation."""
+    await client.set("counter", 10)
+    result = await client.incr("counter")
+    assert result == 11
+    assert await client.get("counter") == 11
+
+
+@pytest.mark.trio
+async def test_trio_decr(client):
+    """Test trio decrement operation."""
+    await client.set("counter", 10)
+    result = await client.decr("counter")
+    assert result == 9
+    assert await client.get("counter") == 9
+
+
+@pytest.mark.trio
+async def test_trio_incr_decr_combined(client):
+    """Test combined increment and decrement operations."""
+    await client.set("counter", 100)
+    
+    # Increment multiple times
+    assert await client.incr("counter", 10) == 110
+    assert await client.incr("counter", 5) == 115
+    
+    # Decrement multiple times
+    assert await client.decr("counter", 3) == 112
+    assert await client.decr("counter") == 111
+    
+    # Final value
+    assert await client.get("counter") == 111
+
+
+@pytest.mark.trio
+async def test_trio_incr_missing_key(client):
+    """Test increment operation on missing key."""
+    await client.delete("nonexistent_counter")
+    with pytest.raises(memcache.MemcacheError):
+        await client.incr("nonexistent_counter")
+
+
+@pytest.mark.trio
+async def test_trio_decr_missing_key(client):
+    """Test decrement operation on missing key."""
+    await client.delete("nonexistent_counter")
+    with pytest.raises(memcache.MemcacheError):
+        await client.decr("nonexistent_counter")

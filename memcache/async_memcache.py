@@ -174,6 +174,34 @@ class AsyncConnection:
         command = MetaCommand(cm=b"md", key=key, flags=[], value=None)
         await self.execute_meta_command(command)
 
+    async def incr(self, key: Union[bytes, str], value: int = 1) -> int:
+        command = MetaCommand(
+            cm=b"ma", key=key, flags=[b"D%d" % value, b"v"]
+        )
+        result = await self.execute_meta_command(command)
+
+        if result.rc != b"VA":
+            raise MemcacheError(f"INCR operation failed: {result.rc.decode()}")
+
+        if result.value is None:
+            raise MemcacheError("INCR operation failed: no value returned")
+
+        return int(result.value)
+
+    async def decr(self, key: Union[bytes, str], value: int = 1) -> int:
+        command = MetaCommand(
+            cm=b"ma", key=key, flags=[b"D%d" % value, b"MD", b"v"]
+        )
+        result = await self.execute_meta_command(command)
+
+        if result.rc != b"VA":
+            raise MemcacheError(f"DECR operation failed: {result.rc.decode()}")
+
+        if result.value is None:
+            raise MemcacheError("DECR operation failed: no value returned")
+
+        return int(result.value)
+
 
 class AsyncPool:
     def __init__(
@@ -343,3 +371,11 @@ class AsyncMemcache:
     async def delete(self, key: Union[bytes, str]) -> None:
         async with self._get_connection(key) as connection:
             return await connection.delete(key)
+
+    async def incr(self, key: Union[bytes, str], value: int = 1) -> int:
+        async with self._get_connection(key) as connection:
+            return await connection.incr(key, value)
+
+    async def decr(self, key: Union[bytes, str], value: int = 1) -> int:
+        async with self._get_connection(key) as connection:
+            return await connection.decr(key, value)
