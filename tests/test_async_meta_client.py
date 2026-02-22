@@ -19,14 +19,16 @@ async def flush(client: AsyncMetaClient) -> None:
 
 
 # ------------------------------------------------------------------ #
-# Basic get / set                                                       #
+# get / set                                                             #
 # ------------------------------------------------------------------ #
 
 
 @pytest.mark.asyncio
 async def test_set_get(client: AsyncMetaClient) -> None:
     await client.set("key1", "hello")
-    assert await client.get("key1") == "hello"
+    r = await client.get("key1")
+    assert r is not None
+    assert r.value == "hello"
 
 
 @pytest.mark.asyncio
@@ -37,101 +39,89 @@ async def test_get_missing(client: AsyncMetaClient) -> None:
 @pytest.mark.asyncio
 async def test_set_get_with_expire(client: AsyncMetaClient) -> None:
     await client.set("expkey", "val", expire=1)
-    assert await client.get("expkey") == "val"
+    r = await client.get("expkey")
+    assert r is not None
+    assert r.value == "val"
     await asyncio.sleep(1.1)
     assert await client.get("expkey") is None
 
 
 @pytest.mark.asyncio
+async def test_get_returns_getresult_instance(client: AsyncMetaClient) -> None:
+    await client.set("gr_type", 42)
+    r = await client.get("gr_type")
+    assert isinstance(r, GetResult)
+    assert r.value == 42
+
+
+@pytest.mark.asyncio
 async def test_get_no_lru_bump(client: AsyncMetaClient) -> None:
     await client.set("nlb", "v")
-    assert await client.get("nlb", no_lru_bump=True) == "v"
+    r = await client.get("nlb", no_lru_bump=True)
+    assert r is not None
+    assert r.value == "v"
 
 
 @pytest.mark.asyncio
 async def test_get_update_ttl(client: AsyncMetaClient) -> None:
     await client.set("utt", "v", expire=10)
-    assert await client.get("utt", update_ttl=3600) == "v"
-
-
-# ------------------------------------------------------------------ #
-# get_result                                                            #
-# ------------------------------------------------------------------ #
-
-
-@pytest.mark.asyncio
-async def test_get_result_miss(client: AsyncMetaClient) -> None:
-    assert await client.get_result("missing_key") is None
-
-
-@pytest.mark.asyncio
-async def test_get_result_basic(client: AsyncMetaClient) -> None:
-    await client.set("gr_key", "world")
-    r = await client.get_result("gr_key")
+    r = await client.get("utt", update_ttl=3600)
     assert r is not None
-    assert r.value == "world"
+    assert r.value == "v"
 
 
 @pytest.mark.asyncio
-async def test_get_result_return_cas(client: AsyncMetaClient) -> None:
+async def test_get_return_cas(client: AsyncMetaClient) -> None:
     await client.set("gr_cas", "v")
-    r = await client.get_result("gr_cas", return_cas=True)
+    r = await client.get("gr_cas", return_cas=True)
     assert r is not None
     assert isinstance(r.cas_token, int)
     assert r.cas_token > 0
 
 
 @pytest.mark.asyncio
-async def test_get_result_return_ttl(client: AsyncMetaClient) -> None:
+async def test_get_return_ttl(client: AsyncMetaClient) -> None:
     await client.set("gr_ttl", "v", expire=3600)
-    r = await client.get_result("gr_ttl", return_ttl=True)
+    r = await client.get("gr_ttl", return_ttl=True)
     assert r is not None
     assert r.ttl is not None
     assert r.ttl > 0
 
 
 @pytest.mark.asyncio
-async def test_get_result_no_ttl_requested(client: AsyncMetaClient) -> None:
+async def test_get_no_ttl_requested(client: AsyncMetaClient) -> None:
     await client.set("gr_nottl", "v")
-    r = await client.get_result("gr_nottl")
+    r = await client.get("gr_nottl")
     assert r is not None
     assert r.ttl is None
 
 
 @pytest.mark.asyncio
-async def test_get_result_return_size(client: AsyncMetaClient) -> None:
+async def test_get_return_size(client: AsyncMetaClient) -> None:
     await client.set("gr_size", b"hello")
-    r = await client.get_result("gr_size", return_size=True)
+    r = await client.get("gr_size", return_size=True)
     assert r is not None
     assert r.size == 5
 
 
 @pytest.mark.asyncio
-async def test_get_result_return_hit_before(client: AsyncMetaClient) -> None:
+async def test_get_return_hit_before(client: AsyncMetaClient) -> None:
     await client.set("gr_hit", "v")
-    r1 = await client.get_result("gr_hit", return_hit_before=True)
+    r1 = await client.get("gr_hit", return_hit_before=True)
     assert r1 is not None
     assert r1.hit_before is False
-    r2 = await client.get_result("gr_hit", return_hit_before=True)
+    r2 = await client.get("gr_hit", return_hit_before=True)
     assert r2 is not None
     assert r2.hit_before is True
 
 
 @pytest.mark.asyncio
-async def test_get_result_return_last_access(client: AsyncMetaClient) -> None:
+async def test_get_return_last_access(client: AsyncMetaClient) -> None:
     await client.set("gr_la", "v")
-    r = await client.get_result("gr_la", return_last_access=True)
+    r = await client.get("gr_la", return_last_access=True)
     assert r is not None
     assert r.last_access is not None
     assert isinstance(r.last_access, int)
-
-
-@pytest.mark.asyncio
-async def test_get_result_returns_getresult_instance(client: AsyncMetaClient) -> None:
-    await client.set("gr_type", 42)
-    r = await client.get_result("gr_type")
-    assert isinstance(r, GetResult)
-    assert r.value == 42
 
 
 # ------------------------------------------------------------------ #
@@ -145,7 +135,9 @@ async def test_gat(client: AsyncMetaClient) -> None:
     result = await client.gat("gat_key", expire=3600)
     assert result == "v"
     await asyncio.sleep(1.1)
-    assert await client.get("gat_key") == "v"
+    r = await client.get("gat_key")
+    assert r is not None
+    assert r.value == "v"
 
 
 @pytest.mark.asyncio
@@ -158,7 +150,9 @@ async def test_touch_existing(client: AsyncMetaClient) -> None:
     await client.set("touch_key", "v", expire=1)
     assert await client.touch("touch_key", expire=3600) is True
     await asyncio.sleep(1.1)
-    assert await client.get("touch_key") == "v"
+    r = await client.get("touch_key")
+    assert r is not None
+    assert r.value == "v"
 
 
 @pytest.mark.asyncio
@@ -176,7 +170,9 @@ async def test_get_many(client: AsyncMetaClient) -> None:
     await client.set("m1", "a")
     await client.set("m2", "b")
     result = await client.get_many(["m1", "m2", "m_miss"])
-    assert result == {"m1": "a", "m2": "b"}
+    assert set(result.keys()) == {"m1", "m2"}
+    assert result["m1"].value == "a"
+    assert result["m2"].value == "b"
 
 
 @pytest.mark.asyncio
@@ -192,21 +188,27 @@ async def test_get_many_all_miss(client: AsyncMetaClient) -> None:
 @pytest.mark.asyncio
 async def test_add_new_key(client: AsyncMetaClient) -> None:
     assert await client.add("add_new", "v") is True
-    assert await client.get("add_new") == "v"
+    r = await client.get("add_new")
+    assert r is not None
+    assert r.value == "v"
 
 
 @pytest.mark.asyncio
 async def test_add_existing_key(client: AsyncMetaClient) -> None:
     await client.set("add_exists", "original")
     assert await client.add("add_exists", "new") is False
-    assert await client.get("add_exists") == "original"
+    r = await client.get("add_exists")
+    assert r is not None
+    assert r.value == "original"
 
 
 @pytest.mark.asyncio
 async def test_replace_existing(client: AsyncMetaClient) -> None:
     await client.set("rep_key", "old")
     assert await client.replace("rep_key", "new") is True
-    assert await client.get("rep_key") == "new"
+    r = await client.get("rep_key")
+    assert r is not None
+    assert r.value == "new"
 
 
 @pytest.mark.asyncio
@@ -223,7 +225,9 @@ async def test_replace_missing(client: AsyncMetaClient) -> None:
 async def test_append(client: AsyncMetaClient) -> None:
     await client.set("app_key", b"hello")
     assert await client.append("app_key", b" world") is True
-    assert await client.get("app_key") == b"hello world"
+    r = await client.get("app_key")
+    assert r is not None
+    assert r.value == b"hello world"
 
 
 @pytest.mark.asyncio
@@ -234,14 +238,18 @@ async def test_append_missing_key(client: AsyncMetaClient) -> None:
 @pytest.mark.asyncio
 async def test_append_vivify(client: AsyncMetaClient) -> None:
     assert await client.append("app_vivify", b"data", vivify_ttl=60) is True
-    assert await client.get("app_vivify") == b"data"
+    r = await client.get("app_vivify")
+    assert r is not None
+    assert r.value == b"data"
 
 
 @pytest.mark.asyncio
 async def test_prepend(client: AsyncMetaClient) -> None:
     await client.set("pre_key", b"world")
     assert await client.prepend("pre_key", b"hello ") is True
-    assert await client.get("pre_key") == b"hello world"
+    r = await client.get("pre_key")
+    assert r is not None
+    assert r.value == b"hello world"
 
 
 @pytest.mark.asyncio
@@ -252,7 +260,9 @@ async def test_prepend_missing_key(client: AsyncMetaClient) -> None:
 @pytest.mark.asyncio
 async def test_prepend_vivify(client: AsyncMetaClient) -> None:
     assert await client.prepend("pre_vivify", b"data", vivify_ttl=60) is True
-    assert await client.get("pre_vivify") == b"data"
+    r = await client.get("pre_vivify")
+    assert r is not None
+    assert r.value == b"data"
 
 
 # ------------------------------------------------------------------ #
@@ -263,22 +273,26 @@ async def test_prepend_vivify(client: AsyncMetaClient) -> None:
 @pytest.mark.asyncio
 async def test_cas_success(client: AsyncMetaClient) -> None:
     await client.set("cas_key", "initial")
-    r = await client.get_result("cas_key", return_cas=True)
+    r = await client.get("cas_key", return_cas=True)
     assert r is not None
     assert r.cas_token is not None
     assert await client.cas("cas_key", "updated", r.cas_token) is True
-    assert await client.get("cas_key") == "updated"
+    r2 = await client.get("cas_key")
+    assert r2 is not None
+    assert r2.value == "updated"
 
 
 @pytest.mark.asyncio
 async def test_cas_conflict(client: AsyncMetaClient) -> None:
     await client.set("cas_conf", "v")
-    r = await client.get_result("cas_conf", return_cas=True)
+    r = await client.get("cas_conf", return_cas=True)
     assert r is not None
     assert r.cas_token is not None
     await client.set("cas_conf", "modified")
     assert await client.cas("cas_conf", "new", r.cas_token) is False
-    assert await client.get("cas_conf") == "modified"
+    r2 = await client.get("cas_conf")
+    assert r2 is not None
+    assert r2.value == "modified"
 
 
 @pytest.mark.asyncio
@@ -306,7 +320,7 @@ async def test_delete_missing(client: AsyncMetaClient) -> None:
 @pytest.mark.asyncio
 async def test_delete_with_cas(client: AsyncMetaClient) -> None:
     await client.set("del_cas", "v")
-    r = await client.get_result("del_cas", return_cas=True)
+    r = await client.get("del_cas", return_cas=True)
     assert r is not None
     assert r.cas_token is not None
     assert await client.delete("del_cas", cas_token=r.cas_token) is True
@@ -338,7 +352,7 @@ async def test_invalidate_missing(client: AsyncMetaClient) -> None:
 async def test_invalidate_stale_flag(client: AsyncMetaClient) -> None:
     await client.set("inv_stale", "v")
     await client.invalidate("inv_stale", stale_ttl=10)
-    r = await client.get_result("inv_stale")
+    r = await client.get("inv_stale")
     assert r is not None
     assert r.is_stale is True
 

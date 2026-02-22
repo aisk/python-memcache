@@ -75,7 +75,8 @@ class Memcache:
         self._meta.set(key, value, expire=expire)
 
     def get(self, key: Union[bytes, str]) -> Optional[Any]:
-        return self._meta.get(key)
+        r = self._meta.get(key)
+        return r.value if r is not None else None
 
     def gets(self, key: Union[bytes, str]) -> Optional[Tuple[Any, int]]:
         """
@@ -84,7 +85,7 @@ class Memcache:
         :param key: The key to retrieve
         :return: A tuple of (value, cas_token) or None if key doesn't exist
         """
-        r = self._meta.get_result(key, return_cas=True)
+        r = self._meta.get(key, return_cas=True)
         if r is None:
             return None
         if r.cas_token is None:
