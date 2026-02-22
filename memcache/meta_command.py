@@ -60,7 +60,7 @@ class MetaResult:
         flags = []
         datalen = None
         if len(parts) > 1:
-            if str(parts[1][0]).isdigit():
+            if chr(parts[1][0]).isdigit():
                 datalen = int(parts[1])
                 flags = parts[2:]
             else:
