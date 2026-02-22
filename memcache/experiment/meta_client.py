@@ -116,31 +116,6 @@ class MetaClient:
         self,
         key: Union[str, bytes],
         *,
-        update_ttl: Optional[int] = None,
-        no_lru_bump: bool = False,
-    ) -> Optional[Any]:
-        key_bytes = self._to_bytes(key)
-        flags: List[bytes] = [b"v", b"f"]
-        if update_ttl is not None:
-            flags.append(b"T%d" % update_ttl)
-        if no_lru_bump:
-            flags.append(b"u")
-
-        command = MetaCommand(cm=b"mg", key=key_bytes, flags=flags)
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
-
-        if result.value is None:
-            return None
-
-        parsed = _parse_flags(result.flags)
-        client_flags = parsed.get("client_flags", 0)
-        return self._load(key_bytes, result.value, client_flags)
-
-    def get_result(
-        self,
-        key: Union[str, bytes],
-        *,
         return_cas: bool = False,
         return_ttl: bool = False,
         return_last_access: bool = False,
@@ -240,14 +215,14 @@ class MetaClient:
     def get_many(
         self,
         keys: List[Union[str, bytes]],
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, GetResult]:
         """Retrieve multiple keys; missing keys are omitted from the result."""
-        result: Dict[str, Any] = {}
+        result: Dict[str, GetResult] = {}
         for key in keys:
             key_str = key if isinstance(key, str) else key.decode("utf-8")
-            value = self.get(key)
-            if value is not None:
-                result[key_str] = value
+            gr = self.get(key)
+            if gr is not None:
+                result[key_str] = gr
         return result
 
     # ------------------------------------------------------------------ #

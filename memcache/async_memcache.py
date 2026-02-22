@@ -78,7 +78,8 @@ class AsyncMemcache:
         await self._meta.set(key, value, expire=expire)
 
     async def get(self, key: Union[bytes, str]) -> Optional[Any]:
-        return await self._meta.get(key)
+        r = await self._meta.get(key)
+        return r.value if r is not None else None
 
     async def gets(self, key: Union[bytes, str]) -> Optional[Tuple[Any, int]]:
         """
@@ -87,7 +88,7 @@ class AsyncMemcache:
         :param key: The key to retrieve
         :return: A tuple of (value, cas_token) or None if key doesn't exist
         """
-        r = await self._meta.get_result(key, return_cas=True)
+        r = await self._meta.get(key, return_cas=True)
         if r is None:
             return None
         if r.cas_token is None:

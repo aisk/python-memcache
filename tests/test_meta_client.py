@@ -44,13 +44,15 @@ def test_load_header_en() -> None:
 
 
 # ------------------------------------------------------------------ #
-# Basic get / set                                                    #
+# get / set                                                          #
 # ------------------------------------------------------------------ #
 
 
 def test_set_get(client: MetaClient) -> None:
     client.set("key1", "hello")
-    assert client.get("key1") == "hello"
+    r = client.get("key1")
+    assert r is not None
+    assert r.value == "hello"
 
 
 def test_get_missing(client: MetaClient) -> None:
@@ -59,99 +61,82 @@ def test_get_missing(client: MetaClient) -> None:
 
 def test_set_get_with_expire(client: MetaClient) -> None:
     client.set("expkey", "val", expire=1)
-    assert client.get("expkey") == "val"
+    r = client.get("expkey")
+    assert r is not None
+    assert r.value == "val"
     time.sleep(1.1)
     assert client.get("expkey") is None
 
 
+def test_get_returns_getresult_instance(client: MetaClient) -> None:
+    client.set("gr_type", 42)
+    r = client.get("gr_type")
+    assert isinstance(r, GetResult)
+    assert r.value == 42
+
+
 def test_get_no_lru_bump(client: MetaClient) -> None:
     client.set("nlb", "v")
-    assert client.get("nlb", no_lru_bump=True) == "v"
+    r = client.get("nlb", no_lru_bump=True)
+    assert r is not None
+    assert r.value == "v"
 
 
 def test_get_update_ttl(client: MetaClient) -> None:
     client.set("utt", "v", expire=10)
-    assert client.get("utt", update_ttl=3600) == "v"
-
-
-# ------------------------------------------------------------------ #
-# get_result                                                         #
-# ------------------------------------------------------------------ #
-
-
-def test_get_result_miss(client: MetaClient) -> None:
-    assert client.get_result("missing_key") is None
-
-
-def test_get_result_basic(client: MetaClient) -> None:
-    client.set("gr_key", "world")
-    r = client.get_result("gr_key")
+    r = client.get("utt", update_ttl=3600)
     assert r is not None
-    assert r.value == "world"
+    assert r.value == "v"
 
 
-def test_get_result_return_cas(client: MetaClient) -> None:
+def test_get_return_cas(client: MetaClient) -> None:
     client.set("gr_cas", "v")
-    r = client.get_result("gr_cas", return_cas=True)
+    r = client.get("gr_cas", return_cas=True)
     assert r is not None
     assert isinstance(r.cas_token, int)
     assert r.cas_token > 0
 
 
-def test_get_result_return_ttl(client: MetaClient) -> None:
+def test_get_return_ttl(client: MetaClient) -> None:
     client.set("gr_ttl", "v", expire=3600)
-    r = client.get_result("gr_ttl", return_ttl=True)
+    r = client.get("gr_ttl", return_ttl=True)
     assert r is not None
     assert r.ttl is not None
     assert r.ttl > 0
 
 
-def test_get_result_no_ttl_requested(client: MetaClient) -> None:
+def test_get_no_ttl_requested(client: MetaClient) -> None:
     client.set("gr_nottl", "v")
-    r = client.get_result("gr_nottl")
+    r = client.get("gr_nottl")
     assert r is not None
     assert r.ttl is None
 
 
-def test_get_result_return_size(client: MetaClient) -> None:
+def test_get_return_size(client: MetaClient) -> None:
     client.set("gr_size", b"hello")
-    r = client.get_result("gr_size", return_size=True)
+    r = client.get("gr_size", return_size=True)
     assert r is not None
     assert r.size == 5
 
 
-def test_get_result_return_hit_before(client: MetaClient) -> None:
+def test_get_return_hit_before(client: MetaClient) -> None:
     client.set("gr_hit", "v")
     # First get: not hit before
-    r1 = client.get_result("gr_hit", return_hit_before=True)
+    r1 = client.get("gr_hit", return_hit_before=True)
     assert r1 is not None
     assert r1.hit_before is False
     # Second get: hit before
-    r2 = client.get_result("gr_hit", return_hit_before=True)
+    r2 = client.get("gr_hit", return_hit_before=True)
     assert r2 is not None
     assert r2.hit_before is True
 
 
-def test_get_result_return_last_access(client: MetaClient) -> None:
+def test_get_return_last_access(client: MetaClient) -> None:
     client.set("gr_la", "v")
-    r = client.get_result("gr_la", return_last_access=True)
+    r = client.get("gr_la", return_last_access=True)
     assert r is not None
     assert r.last_access is not None
     assert isinstance(r.last_access, int)
-
-
-def test_get_result_no_lru_bump(client: MetaClient) -> None:
-    client.set("gr_nlb", "v")
-    r = client.get_result("gr_nlb", no_lru_bump=True)
-    assert r is not None
-    assert r.value == "v"
-
-
-def test_get_result_returns_getresult_instance(client: MetaClient) -> None:
-    client.set("gr_type", 42)
-    r = client.get_result("gr_type")
-    assert isinstance(r, GetResult)
-    assert r.value == 42
 
 
 # ------------------------------------------------------------------ #
@@ -165,7 +150,9 @@ def test_gat(client: MetaClient) -> None:
     assert result == "v"
     # After gat with long TTL, key should still exist past original TTL
     time.sleep(1.1)
-    assert client.get("gat_key") == "v"
+    r = client.get("gat_key")
+    assert r is not None
+    assert r.value == "v"
 
 
 def test_gat_miss(client: MetaClient) -> None:
@@ -176,7 +163,9 @@ def test_touch_existing(client: MetaClient) -> None:
     client.set("touch_key", "v", expire=1)
     assert client.touch("touch_key", expire=3600) is True
     time.sleep(1.1)
-    assert client.get("touch_key") == "v"
+    r = client.get("touch_key")
+    assert r is not None
+    assert r.value == "v"
 
 
 def test_touch_missing(client: MetaClient) -> None:
@@ -192,7 +181,9 @@ def test_get_many(client: MetaClient) -> None:
     client.set("m1", "a")
     client.set("m2", "b")
     result = client.get_many(["m1", "m2", "m_miss"])
-    assert result == {"m1": "a", "m2": "b"}
+    assert set(result.keys()) == {"m1", "m2"}
+    assert result["m1"].value == "a"
+    assert result["m2"].value == "b"
 
 
 def test_get_many_all_miss(client: MetaClient) -> None:
@@ -206,19 +197,25 @@ def test_get_many_all_miss(client: MetaClient) -> None:
 
 def test_add_new_key(client: MetaClient) -> None:
     assert client.add("add_new", "v") is True
-    assert client.get("add_new") == "v"
+    r = client.get("add_new")
+    assert r is not None
+    assert r.value == "v"
 
 
 def test_add_existing_key(client: MetaClient) -> None:
     client.set("add_exists", "original")
     assert client.add("add_exists", "new") is False
-    assert client.get("add_exists") == "original"
+    r = client.get("add_exists")
+    assert r is not None
+    assert r.value == "original"
 
 
 def test_replace_existing(client: MetaClient) -> None:
     client.set("rep_key", "old")
     assert client.replace("rep_key", "new") is True
-    assert client.get("rep_key") == "new"
+    r = client.get("rep_key")
+    assert r is not None
+    assert r.value == "new"
 
 
 def test_replace_missing(client: MetaClient) -> None:
@@ -233,7 +230,9 @@ def test_replace_missing(client: MetaClient) -> None:
 def test_append(client: MetaClient) -> None:
     client.set("app_key", b"hello")
     assert client.append("app_key", b" world") is True
-    assert client.get("app_key") == b"hello world"
+    r = client.get("app_key")
+    assert r is not None
+    assert r.value == b"hello world"
 
 
 def test_append_missing_key(client: MetaClient) -> None:
@@ -242,13 +241,17 @@ def test_append_missing_key(client: MetaClient) -> None:
 
 def test_append_vivify(client: MetaClient) -> None:
     assert client.append("app_vivify", b"data", vivify_ttl=60) is True
-    assert client.get("app_vivify") == b"data"
+    r = client.get("app_vivify")
+    assert r is not None
+    assert r.value == b"data"
 
 
 def test_prepend(client: MetaClient) -> None:
     client.set("pre_key", b"world")
     assert client.prepend("pre_key", b"hello ") is True
-    assert client.get("pre_key") == b"hello world"
+    r = client.get("pre_key")
+    assert r is not None
+    assert r.value == b"hello world"
 
 
 def test_prepend_missing_key(client: MetaClient) -> None:
@@ -257,7 +260,9 @@ def test_prepend_missing_key(client: MetaClient) -> None:
 
 def test_prepend_vivify(client: MetaClient) -> None:
     assert client.prepend("pre_vivify", b"data", vivify_ttl=60) is True
-    assert client.get("pre_vivify") == b"data"
+    r = client.get("pre_vivify")
+    assert r is not None
+    assert r.value == b"data"
 
 
 # ------------------------------------------------------------------ #
@@ -267,21 +272,25 @@ def test_prepend_vivify(client: MetaClient) -> None:
 
 def test_cas_success(client: MetaClient) -> None:
     client.set("cas_key", "initial")
-    r = client.get_result("cas_key", return_cas=True)
+    r = client.get("cas_key", return_cas=True)
     assert r is not None
     assert r.cas_token is not None
     assert client.cas("cas_key", "updated", r.cas_token) is True
-    assert client.get("cas_key") == "updated"
+    r2 = client.get("cas_key")
+    assert r2 is not None
+    assert r2.value == "updated"
 
 
 def test_cas_conflict(client: MetaClient) -> None:
     client.set("cas_conf", "v")
-    r = client.get_result("cas_conf", return_cas=True)
+    r = client.get("cas_conf", return_cas=True)
     assert r is not None
     assert r.cas_token is not None
     client.set("cas_conf", "modified")
     assert client.cas("cas_conf", "new", r.cas_token) is False
-    assert client.get("cas_conf") == "modified"
+    r2 = client.get("cas_conf")
+    assert r2 is not None
+    assert r2.value == "modified"
 
 
 def test_cas_missing_key(client: MetaClient) -> None:
@@ -305,7 +314,7 @@ def test_delete_missing(client: MetaClient) -> None:
 
 def test_delete_with_cas(client: MetaClient) -> None:
     client.set("del_cas", "v")
-    r = client.get_result("del_cas", return_cas=True)
+    r = client.get("del_cas", return_cas=True)
     assert r is not None
     assert r.cas_token is not None
     assert client.delete("del_cas", cas_token=r.cas_token) is True
@@ -333,8 +342,8 @@ def test_invalidate_missing(client: MetaClient) -> None:
 def test_invalidate_stale_flag(client: MetaClient) -> None:
     client.set("inv_stale", "v")
     client.invalidate("inv_stale", stale_ttl=10)
-    # After invalidation, get_result should see is_stale=True
-    r = client.get_result("inv_stale")
+    # After invalidation, get should see is_stale=True
+    r = client.get("inv_stale")
     assert r is not None
     assert r.is_stale is True
 
