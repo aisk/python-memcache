@@ -1,6 +1,5 @@
 import pytest
 import trio
-import time
 
 import memcache
 
