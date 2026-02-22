@@ -126,7 +126,7 @@ class MetaClient:
         vivify_on_miss_ttl: Optional[int] = None,
         recache_ttl_threshold: Optional[int] = None,
         check_cas: Optional[int] = None,
-    ) -> Optional[GetResult]:
+    ) -> Optional[GetResult[Any]]:
         key_bytes = self._to_bytes(key)
         flags: List[bytes] = [b"v", b"f"]
         if return_cas:
@@ -159,7 +159,7 @@ class MetaClient:
 
         parsed = _parse_flags(result.flags)
 
-        gr = GetResult()
+        gr: GetResult[Any] = GetResult()
         gr.is_stale = parsed.get("is_stale", False)
         gr.won_recache = parsed.get("won_recache", False)
         gr.already_won = parsed.get("already_won", False)
@@ -215,9 +215,9 @@ class MetaClient:
     def get_many(
         self,
         keys: List[Union[str, bytes]],
-    ) -> Dict[str, GetResult]:
+    ) -> Dict[str, GetResult[Any]]:
         """Retrieve multiple keys; missing keys are omitted from the result."""
-        result: Dict[str, GetResult] = {}
+        result: Dict[str, GetResult[Any]] = {}
         for key in keys:
             key_str = key if isinstance(key, str) else key.decode("utf-8")
             gr = self.get(key)

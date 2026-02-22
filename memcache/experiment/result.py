@@ -1,10 +1,13 @@
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Generic, Optional, TypeVar
+
+
+T = TypeVar("T")
 
 
 @dataclass
-class GetResult:
-    value: Optional[Any] = None
+class GetResult(Generic[T]):
+    value: Optional[T] = None
     key: Optional[str] = None
     cas_token: Optional[int] = None
     ttl: Optional[int] = None
