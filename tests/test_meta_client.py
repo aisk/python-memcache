@@ -140,23 +140,8 @@ def test_get_return_last_access(client: MetaClient) -> None:
 
 
 # ------------------------------------------------------------------ #
-# gat / touch                                                        #
+# touch                                                              #
 # ------------------------------------------------------------------ #
-
-
-def test_gat(client: MetaClient) -> None:
-    client.set("gat_key", "v", expire=1)
-    result = client.gat("gat_key", expire=3600)
-    assert result == "v"
-    # After gat with long TTL, key should still exist past original TTL
-    time.sleep(1.1)
-    r = client.get("gat_key")
-    assert r is not None
-    assert r.value == "v"
-
-
-def test_gat_miss(client: MetaClient) -> None:
-    assert client.gat("no_gat_key", expire=60) is None
 
 
 def test_touch_existing(client: MetaClient) -> None:

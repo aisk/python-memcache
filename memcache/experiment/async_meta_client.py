@@ -157,24 +157,6 @@ class AsyncMetaClient:
 
         return gr
 
-    async def gat(self, key: Union[str, bytes], expire: int) -> Optional[Any]:
-        """Atomic get-and-touch: retrieve value and update TTL atomically."""
-        key_bytes = self._to_bytes(key)
-        command = MetaCommand(
-            cm=b"mg",
-            key=key_bytes,
-            flags=[b"v", b"f", b"T%d" % expire],
-        )
-        async with self._get_connection(key_bytes) as connection:
-            result = await connection.execute_meta_command(command)
-
-        if result.value is None:
-            return None
-
-        parsed = _parse_flags(result.flags)
-        client_flags = parsed.get("client_flags", 0)
-        return self._load(key_bytes, result.value, client_flags)
-
     async def touch(self, key: Union[str, bytes], expire: int) -> bool:
         """Update the TTL of a key without returning its value."""
         key_bytes = self._to_bytes(key)

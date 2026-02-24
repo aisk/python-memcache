@@ -125,24 +125,8 @@ async def test_get_return_last_access(client: AsyncMetaClient) -> None:
 
 
 # ------------------------------------------------------------------ #
-# gat / touch                                                           #
+# touch                                                                 #
 # ------------------------------------------------------------------ #
-
-
-@pytest.mark.asyncio
-async def test_gat(client: AsyncMetaClient) -> None:
-    await client.set("gat_key", "v", expire=1)
-    result = await client.gat("gat_key", expire=3600)
-    assert result == "v"
-    await asyncio.sleep(1.1)
-    r = await client.get("gat_key")
-    assert r is not None
-    assert r.value == "v"
-
-
-@pytest.mark.asyncio
-async def test_gat_miss(client: AsyncMetaClient) -> None:
-    assert await client.gat("no_gat_key", expire=60) is None
 
 
 @pytest.mark.asyncio
