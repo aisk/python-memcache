@@ -152,15 +152,15 @@ async def test_trio_decr(client):
 async def test_trio_incr_decr_combined(client):
     """Test combined increment and decrement operations."""
     await client.set("counter", 100)
-    
+
     # Increment multiple times
     assert await client.incr("counter", 10) == 110
     assert await client.incr("counter", 5) == 115
-    
+
     # Decrement multiple times
     assert await client.decr("counter", 3) == 112
     assert await client.decr("counter") == 111
-    
+
     # Final value
     assert await client.get("counter") == 111
 

@@ -37,6 +37,12 @@ def test_delete(client):
     assert client.get(b"to_be_deleted") is None
 
 
+def test_delete_returns_bool(client):
+    client.set("bool_delete_key", "value")
+    assert client.delete("bool_delete_key") is True
+    assert client.delete("bool_delete_key") is False
+
+
 def test_flush_all(client):
     client.flush_all()
     client.flush_all()
@@ -133,15 +139,15 @@ def test_decr_with_value(client):
 
 def test_incr_decr_combined(client):
     client.set("counter", 100)
-    
+
     # Increment multiple times
     assert client.incr("counter", 10) == 110
     assert client.incr("counter", 5) == 115
-    
+
     # Decrement multiple times
     assert client.decr("counter", 3) == 112
     assert client.decr("counter") == 111
-    
+
     # Final value
     assert client.get("counter") == 111
 
@@ -156,3 +162,46 @@ def test_decr_missing_key(client):
     client.delete("nonexistent_counter")
     with pytest.raises(memcache.MemcacheError):
         client.decr("nonexistent_counter")
+
+
+def test_touch(client):
+    client.set("touch_key", "value", expire=10)
+    assert client.touch("touch_key", 100) is True
+    assert client.get("touch_key") == "value"
+    assert client.touch("nonexistent_touch_key", 100) is False
+
+
+def test_add(client):
+    client.delete("add_key")
+    assert client.add("add_key", "value") is True
+    assert client.add("add_key", "other") is False
+    assert client.get("add_key") == "value"
+
+
+def test_replace(client):
+    client.delete("replace_key")
+    assert client.replace("replace_key", "value") is False
+    client.set("replace_key", "original")
+    assert client.replace("replace_key", "updated") is True
+    assert client.get("replace_key") == "updated"
+
+
+def test_append(client):
+    client.set("append_key", b"hello")
+    assert client.append("append_key", b" world") is True
+    assert client.get("append_key") == b"hello world"
+
+
+def test_prepend(client):
+    client.set("prepend_key", b"world")
+    assert client.prepend("prepend_key", b"hello ") is True
+    assert client.get("prepend_key") == b"hello world"
+
+
+def test_get_many(client):
+    client.set("gm_key1", "val1")
+    client.set("gm_key2", "val2")
+    client.delete("gm_missing")
+    result = client.get_many(["gm_key1", "gm_key2", "gm_missing"])
+    assert result == {"gm_key1": "val1", "gm_key2": "val2"}
+    assert "gm_missing" not in result
