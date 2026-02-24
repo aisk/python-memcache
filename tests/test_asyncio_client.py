@@ -41,6 +41,13 @@ async def test_delete(client):
 
 
 @pytest.mark.asyncio
+async def test_delete_returns_bool(client):
+    await client.set("bool_delete_key", "value")
+    assert await client.delete("bool_delete_key") is True
+    assert await client.delete("bool_delete_key") is False
+
+
+@pytest.mark.asyncio
 async def test_flush_all(client):
     await client.flush_all()
     await client.flush_all()
@@ -148,15 +155,15 @@ async def test_decr_with_value(client):
 @pytest.mark.asyncio
 async def test_incr_decr_combined(client):
     await client.set("counter", 100)
-    
+
     # Increment multiple times
     assert await client.incr("counter", 10) == 110
     assert await client.incr("counter", 5) == 115
-    
+
     # Decrement multiple times
     assert await client.decr("counter", 3) == 112
     assert await client.decr("counter") == 111
-    
+
     # Final value
     assert await client.get("counter") == 111
 
@@ -173,3 +180,52 @@ async def test_decr_missing_key(client):
     await client.delete("nonexistent_counter")
     with pytest.raises(memcache.MemcacheError):
         await client.decr("nonexistent_counter")
+
+
+@pytest.mark.asyncio
+async def test_touch(client):
+    await client.set("touch_key", "value", expire=10)
+    assert await client.touch("touch_key", 100) is True
+    assert await client.get("touch_key") == "value"
+    assert await client.touch("nonexistent_touch_key", 100) is False
+
+
+@pytest.mark.asyncio
+async def test_add(client):
+    await client.delete("add_key")
+    assert await client.add("add_key", "value") is True
+    assert await client.add("add_key", "other") is False
+    assert await client.get("add_key") == "value"
+
+
+@pytest.mark.asyncio
+async def test_replace(client):
+    await client.delete("replace_key")
+    assert await client.replace("replace_key", "value") is False
+    await client.set("replace_key", "original")
+    assert await client.replace("replace_key", "updated") is True
+    assert await client.get("replace_key") == "updated"
+
+
+@pytest.mark.asyncio
+async def test_append(client):
+    await client.set("append_key", b"hello")
+    assert await client.append("append_key", b" world") is True
+    assert await client.get("append_key") == b"hello world"
+
+
+@pytest.mark.asyncio
+async def test_prepend(client):
+    await client.set("prepend_key", b"world")
+    assert await client.prepend("prepend_key", b"hello ") is True
+    assert await client.get("prepend_key") == b"hello world"
+
+
+@pytest.mark.asyncio
+async def test_get_many(client):
+    await client.set("gm_key1", "val1")
+    await client.set("gm_key2", "val2")
+    await client.delete("gm_missing")
+    result = await client.get_many(["gm_key1", "gm_key2", "gm_missing"])
+    assert result == {"gm_key1": "val1", "gm_key2": "val2"}
+    assert "gm_missing" not in result

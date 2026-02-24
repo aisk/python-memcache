@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from typing import Any, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from .connection import Addr, Connection, Pool  # re-export for backward compat
 from .errors import MemcacheError
@@ -113,8 +113,31 @@ class Memcache:
         if not ok:
             raise MemcacheError("CAS operation failed: token mismatch or other error")
 
-    def delete(self, key: Union[bytes, str]) -> None:
-        self._meta.delete(key)
+    def delete(self, key: Union[bytes, str]) -> bool:
+        return self._meta.delete(key)
+
+    def touch(self, key: Union[bytes, str], expire: int) -> bool:
+        return self._meta.touch(key, expire)
+
+    def add(
+        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
+    ) -> bool:
+        return self._meta.add(key, value, expire=expire)
+
+    def replace(
+        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
+    ) -> bool:
+        return self._meta.replace(key, value, expire=expire)
+
+    def append(self, key: Union[bytes, str], value: Any) -> bool:
+        return self._meta.append(key, value)
+
+    def prepend(self, key: Union[bytes, str], value: Any) -> bool:
+        return self._meta.prepend(key, value)
+
+    def get_many(self, keys: List[Union[bytes, str]]) -> Dict[str, Any]:
+        results = self._meta.get_many(keys)
+        return {k: v.value for k, v in results.items()}
 
     def incr(self, key: Union[bytes, str], value: int = 1) -> int:
         return self._meta.incr(key, value)

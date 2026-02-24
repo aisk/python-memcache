@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, List, Optional, Tuple, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
 from .async_connection import AsyncConnection, AsyncPool  # noqa: F401 re-export
 from .connection import Addr
@@ -116,8 +116,31 @@ class AsyncMemcache:
         if not ok:
             raise MemcacheError("CAS operation failed: token mismatch or other error")
 
-    async def delete(self, key: Union[bytes, str]) -> None:
-        await self._meta.delete(key)
+    async def delete(self, key: Union[bytes, str]) -> bool:
+        return await self._meta.delete(key)
+
+    async def touch(self, key: Union[bytes, str], expire: int) -> bool:
+        return await self._meta.touch(key, expire)
+
+    async def add(
+        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
+    ) -> bool:
+        return await self._meta.add(key, value, expire=expire)
+
+    async def replace(
+        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
+    ) -> bool:
+        return await self._meta.replace(key, value, expire=expire)
+
+    async def append(self, key: Union[bytes, str], value: Any) -> bool:
+        return await self._meta.append(key, value)
+
+    async def prepend(self, key: Union[bytes, str], value: Any) -> bool:
+        return await self._meta.prepend(key, value)
+
+    async def get_many(self, keys: List[Union[bytes, str]]) -> Dict[str, Any]:
+        results = await self._meta.get_many(keys)
+        return {k: v.value for k, v in results.items()}
 
     async def incr(self, key: Union[bytes, str], value: int = 1) -> int:
         return await self._meta.incr(key, value)
