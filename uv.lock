@@ -426,7 +426,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "anyio", extra = ["trio"] },
+    { name = "anyio", extra = ["trio"], marker = "python_full_version < '3.13'" },
     { name = "black", version = "23.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.8'" },
     { name = "black", version = "24.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.8.*'" },
     { name = "black", version = "25.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
@@ -441,8 +441,8 @@ dev = [
     { name = "pytest-asyncio", version = "0.21.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.8'" },
     { name = "pytest-asyncio", version = "0.24.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.8.*'" },
     { name = "pytest-asyncio", version = "1.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
-    { name = "pytest-trio" },
-    { name = "trio-typing", marker = "python_full_version >= '3.8'" },
+    { name = "pytest-trio", marker = "python_full_version < '3.13'" },
+    { name = "trio-typing", marker = "python_full_version >= '3.8' and python_full_version < '3.13'" },
 ]
 
 [package.metadata]
@@ -453,7 +453,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "anyio", extras = ["trio"], specifier = ">=3.0.0,<4.0.0" },
+    { name = "anyio", extras = ["trio"], marker = "python_full_version < '3.13'", specifier = ">=3.0.0,<4.0.0" },
     { name = "black", marker = "python_full_version < '3.8'", specifier = ">=23.0.0,<24.0.0" },
     { name = "black", marker = "python_full_version >= '3.8'", specifier = ">=24.0.0" },
     { name = "flake8", marker = "python_full_version < '3.9'", specifier = ">=5.0.0,<6.0.0" },
@@ -464,8 +464,8 @@ dev = [
     { name = "pytest", marker = "python_full_version >= '3.8'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "python_full_version < '3.8'", specifier = ">=0.15.0,<0.23.0" },
     { name = "pytest-asyncio", marker = "python_full_version >= '3.8'", specifier = ">=0.23.0" },
-    { name = "pytest-trio" },
-    { name = "trio-typing", marker = "python_full_version >= '3.8'", specifier = ">=0.10.0" },
+    { name = "pytest-trio", marker = "python_full_version < '3.13'" },
+    { name = "trio-typing", marker = "python_full_version >= '3.8' and python_full_version < '3.13'", specifier = ">=0.10.0" },
     { name = "types-dataclasses", marker = "python_full_version == '3.6.*'", specifier = ">=0.6.0" },
 ]
 

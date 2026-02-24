@@ -11,14 +11,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: [3.8, 3.9, "3.10", 3.11, 3.12, 3.13]
+        python-version: [3.8, 3.9, "3.10", 3.11, 3.12, 3.13, 3.14]
         os: [ubuntu-latest]
-        disable_trio: [""]
         include:
           - python-version: "3.13"
-            disable_trio: "-p no:pytest-trio"
-          - python-version: "3.14-dev"
-            disable_trio: "-p no:pytest-trio"
+            mypy_exclude: "--exclude tests/test_trio_client"
+            pytest_ignore: "--ignore=tests/test_trio_client.py"
+          - python-version: "3.14"
+            mypy_exclude: "--exclude tests/test_trio_client"
+            pytest_ignore: "--ignore=tests/test_trio_client.py"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: KeisukeYamashita/memcached-actions@v1
@@ -31,10 +32,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
       - name: Mypy
-        run: uv run mypy . --exclude .venv
+        run: uv run mypy . --exclude .venv ${{ matrix.mypy_exclude }}
       - name: Lint with flake8
         run: |
           uv run flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=.venv
           uv run flake8 . --count --exit-zero --max-complexity=10 --statistics --exclude=.venv
       - name: Test with pytest
-        run: pytest ${{ matrix.disable_trio }}
+        run: uv run pytest ${{ matrix.pytest_ignore }}
