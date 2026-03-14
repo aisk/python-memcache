@@ -73,9 +73,9 @@ client = MetaClient(("localhost", 11211))
 # get returns a GetResult with rich metadata
 result = client.get(
     "key",
-    return_cas=True,
-    return_ttl=True,
-    return_hit_before=True,
+    with_cas=True,
+    with_ttl=True,
+    with_hit_before=True,
 )
 if result is not None:
     print(result.value)

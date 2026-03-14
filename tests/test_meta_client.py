@@ -89,17 +89,17 @@ def test_get_update_ttl(client: MetaClient) -> None:
     assert r.value == "v"
 
 
-def test_get_return_cas(client: MetaClient) -> None:
+def test_get_with_cas(client: MetaClient) -> None:
     client.set("gr_cas", "v")
-    r = client.get("gr_cas", return_cas=True)
+    r = client.get("gr_cas", with_cas=True)
     assert r is not None
     assert isinstance(r.cas_token, int)
     assert r.cas_token > 0
 
 
-def test_get_return_ttl(client: MetaClient) -> None:
+def test_get_with_ttl(client: MetaClient) -> None:
     client.set("gr_ttl", "v", expire=3600)
-    r = client.get("gr_ttl", return_ttl=True)
+    r = client.get("gr_ttl", with_ttl=True)
     assert r is not None
     assert r.ttl is not None
     assert r.ttl > 0
@@ -112,28 +112,28 @@ def test_get_no_ttl_requested(client: MetaClient) -> None:
     assert r.ttl is None
 
 
-def test_get_return_size(client: MetaClient) -> None:
+def test_get_with_size(client: MetaClient) -> None:
     client.set("gr_size", b"hello")
-    r = client.get("gr_size", return_size=True)
+    r = client.get("gr_size", with_size=True)
     assert r is not None
     assert r.size == 5
 
 
-def test_get_return_hit_before(client: MetaClient) -> None:
+def test_get_with_hit_before(client: MetaClient) -> None:
     client.set("gr_hit", "v")
     # First get: not hit before
-    r1 = client.get("gr_hit", return_hit_before=True)
+    r1 = client.get("gr_hit", with_hit_before=True)
     assert r1 is not None
     assert r1.hit_before is False
     # Second get: hit before
-    r2 = client.get("gr_hit", return_hit_before=True)
+    r2 = client.get("gr_hit", with_hit_before=True)
     assert r2 is not None
     assert r2.hit_before is True
 
 
-def test_get_return_last_access(client: MetaClient) -> None:
+def test_get_with_last_access(client: MetaClient) -> None:
     client.set("gr_la", "v")
-    r = client.get("gr_la", return_last_access=True)
+    r = client.get("gr_la", with_last_access=True)
     assert r is not None
     assert r.last_access is not None
     assert isinstance(r.last_access, int)
@@ -257,7 +257,7 @@ def test_prepend_vivify(client: MetaClient) -> None:
 
 def test_cas_success(client: MetaClient) -> None:
     client.set("cas_key", "initial")
-    r = client.get("cas_key", return_cas=True)
+    r = client.get("cas_key", with_cas=True)
     assert r is not None
     assert r.cas_token is not None
     assert client.cas("cas_key", "updated", r.cas_token) is True
@@ -268,7 +268,7 @@ def test_cas_success(client: MetaClient) -> None:
 
 def test_cas_conflict(client: MetaClient) -> None:
     client.set("cas_conf", "v")
-    r = client.get("cas_conf", return_cas=True)
+    r = client.get("cas_conf", with_cas=True)
     assert r is not None
     assert r.cas_token is not None
     client.set("cas_conf", "modified")
@@ -299,7 +299,7 @@ def test_delete_missing(client: MetaClient) -> None:
 
 def test_delete_with_cas(client: MetaClient) -> None:
     client.set("del_cas", "v")
-    r = client.get("del_cas", return_cas=True)
+    r = client.get("del_cas", with_cas=True)
     assert r is not None
     assert r.cas_token is not None
     assert client.delete("del_cas", cas_token=r.cas_token) is True
