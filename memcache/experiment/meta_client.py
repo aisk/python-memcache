@@ -116,11 +116,11 @@ class MetaClient:
         self,
         key: Union[str, bytes],
         *,
-        return_cas: bool = False,
-        return_ttl: bool = False,
-        return_last_access: bool = False,
-        return_size: bool = False,
-        return_hit_before: bool = False,
+        with_cas: bool = False,
+        with_ttl: bool = False,
+        with_last_access: bool = False,
+        with_size: bool = False,
+        with_hit_before: bool = False,
         update_ttl: Optional[int] = None,
         no_lru_bump: bool = False,
         vivify_on_miss_ttl: Optional[int] = None,
@@ -129,15 +129,15 @@ class MetaClient:
     ) -> Optional[GetResult[Any]]:
         key_bytes = self._to_bytes(key)
         flags: List[bytes] = [b"v", b"f"]
-        if return_cas:
+        if with_cas:
             flags.append(b"c")
-        if return_ttl:
+        if with_ttl:
             flags.append(b"t")
-        if return_last_access:
+        if with_last_access:
             flags.append(b"l")
-        if return_size:
+        if with_size:
             flags.append(b"s")
-        if return_hit_before:
+        if with_hit_before:
             flags.append(b"h")
         if update_ttl is not None:
             flags.append(b"T%d" % update_ttl)
@@ -163,15 +163,15 @@ class MetaClient:
         gr.is_stale = parsed.get("is_stale", False)
         gr.won_recache = parsed.get("won_recache", False)
         gr.already_won = parsed.get("already_won", False)
-        if return_cas:
+        if with_cas:
             gr.cas_token = parsed.get("cas_token")
-        if return_ttl:
+        if with_ttl:
             gr.ttl = parsed.get("ttl")
-        if return_last_access:
+        if with_last_access:
             gr.last_access = parsed.get("last_access")
-        if return_size:
+        if with_size:
             gr.size = parsed.get("size")
-        if return_hit_before:
+        if with_hit_before:
             gr.hit_before = parsed.get("hit_before")
         if "key" in parsed:
             gr.key = parsed["key"]

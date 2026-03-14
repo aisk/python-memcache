@@ -88,7 +88,7 @@ class AsyncMemcache:
         :param key: The key to retrieve
         :return: A tuple of (value, cas_token) or None if key doesn't exist
         """
-        r = await self._meta.get(key, return_cas=True)
+        r = await self._meta.get(key, with_cas=True)
         if r is None:
             return None
         if r.cas_token is None:
