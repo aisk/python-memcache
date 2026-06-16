@@ -1,10 +1,11 @@
+import base64
 import time
 
 import pytest
 
 from memcache.experiment import GetResult, MetaClient
 from memcache import MemcacheError
-from memcache.meta_command import MetaCommand, MetaResult
+from memcache.meta_command import MetaCommand, MetaResult, encode_key
 
 
 @pytest.fixture()
@@ -421,3 +422,39 @@ def test_execute_meta_command(client: MetaClient) -> None:
     result2 = client.execute_meta_command(cmd2)
     assert result2.rc == b"VA"
     assert result2.value == b"raw"
+
+
+# ------------------------------------------------------------------ #
+# Non-legacy keys: base64 encoding on the wire (b flag)              #
+# ------------------------------------------------------------------ #
+
+
+def test_encode_key() -> None:
+    # Legacy-safe keys are sent verbatim; keys with whitespace/control/binary
+    # bytes are base64-encoded; oversized keys are rejected before sending.
+    assert encode_key(b"plain_key") == (b"plain_key", False)
+    assert encode_key(b"a b") == (base64.b64encode(b"a b"), True)
+    # The 250-byte limit applies to the wire token, so a legacy key may be up
+    # to 250 bytes while a binary key is capped by its (larger) base64 form.
+    with pytest.raises(MemcacheError):
+        encode_key(b"x" * 251)
+    assert encode_key(b"\x00" * 186)[1] is True  # base64 -> 248 bytes, ok
+    with pytest.raises(MemcacheError):
+        encode_key(b"\x00" * 187)  # base64 -> 252 bytes, too long
+
+
+def test_meta_command_encodes_non_legacy_key_on_wire() -> None:
+    cmd = MetaCommand(cm=b"mg", key=b"crlf\r\ninjection", flags=[b"v"])
+    assert cmd.key == b"crlf\r\ninjection"  # raw key kept as-is
+    header = cmd.dump_header()
+    assert base64.b64encode(b"crlf\r\ninjection") in header
+    assert b" b " in header  # base64 flag appended
+    assert b"\r\n" not in header[:-2]  # raw CRLF did not corrupt the frame
+
+
+def test_set_get_non_legacy_key(client: MetaClient) -> None:
+    # End-to-end: the server accepts our base64 + `b` wire format and routing.
+    client.set(b"crlf\r\ninjection", "payload")
+    r = client.get(b"crlf\r\ninjection")
+    assert r is not None
+    assert r.value == "payload"

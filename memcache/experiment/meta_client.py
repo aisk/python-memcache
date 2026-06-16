@@ -93,7 +93,8 @@ class MetaClient:
     @contextmanager
     def _get_connection(self, key: Union[str, bytes]) -> Iterator[Connection]:
         if isinstance(key, bytes):
-            key = key.decode("utf-8")
+            # latin-1 maps every byte 1:1 so binary keys never raise here.
+            key = key.decode("latin-1")
         pool = self._connections.get_node(key)
         with pool.get() as connection:
             yield connection
@@ -201,7 +202,7 @@ class MetaClient:
         """Retrieve multiple keys; missing keys are omitted from the result."""
         result: Dict[str, GetResult[Any]] = {}
         for key in keys:
-            key_str = key if isinstance(key, str) else key.decode("utf-8")
+            key_str = key if isinstance(key, str) else key.decode("latin-1")
             gr = self.get(key)
             if gr is not None:
                 result[key_str] = gr

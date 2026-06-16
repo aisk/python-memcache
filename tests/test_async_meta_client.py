@@ -436,3 +436,17 @@ async def test_execute_meta_command(client: AsyncMetaClient) -> None:
     result2 = await client.execute_meta_command(cmd2)
     assert result2.rc == b"VA"
     assert result2.value == b"raw"
+
+
+# ------------------------------------------------------------------ #
+# Non-legacy keys: base64 encoding on the wire (b flag)              #
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_set_get_non_legacy_key(client: AsyncMetaClient) -> None:
+    # End-to-end: the server accepts our base64 + `b` wire format and routing.
+    await client.set(b"crlf\r\ninjection", "payload")
+    r = await client.get(b"crlf\r\ninjection")
+    assert r is not None
+    assert r.value == "payload"
