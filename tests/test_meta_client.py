@@ -44,6 +44,16 @@ def test_load_header_en() -> None:
     assert result.flags == []
 
 
+def test_load_header_client_error_preserves_message_prefix() -> None:
+    with pytest.raises(MemcacheError, match="^Invalid arguments$"):
+        MetaResult.load_header(b"CLIENT_ERROR Invalid arguments\r\n")
+
+
+def test_load_header_server_error() -> None:
+    with pytest.raises(MemcacheError, match="^Temporary failure$"):
+        MetaResult.load_header(b"SERVER_ERROR Temporary failure\r\n")
+
+
 # ------------------------------------------------------------------ #
 # get / set                                                          #
 # ------------------------------------------------------------------ #

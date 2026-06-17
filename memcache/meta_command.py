@@ -86,13 +86,13 @@ class MetaResult:
         parts = line.split()
 
         rc = parts[0]
-        if rc == b"CLIENT_ERROR":
+        if rc in (b"CLIENT_ERROR", b"SERVER_ERROR"):
             # Old ascii protocol error.
-            raise MemcacheError(
-                line.lstrip(b"CLIENT_ERROR ")
-                .rstrip()
-                .decode("utf-8")
-            )
+            prefix = rc + b" "
+            # Use ``line.removeprefix(prefix)`` when dropping Python 3.8 support.
+            if line.startswith(prefix):
+                line = line[len(prefix) :]
+            raise MemcacheError(line.rstrip().decode("utf-8"))
 
         flags = []
         datalen = None
