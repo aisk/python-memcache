@@ -73,6 +73,12 @@ class MetaCommand:
             header = b" ".join([self.cm, wire_key, datalen] + flags + [b"\r\n"])
         return header
 
+    def dump(self) -> bytes:
+        payload = self.dump_header()
+        if self.value is not None:
+            payload += self.value + b"\r\n"
+        return payload
+
 
 @dataclass
 class MetaResult:
@@ -91,7 +97,7 @@ class MetaResult:
             prefix = rc + b" "
             # Use ``line.removeprefix(prefix)`` when dropping Python 3.8 support.
             if line.startswith(prefix):
-                line = line[len(prefix) :]
+                line = line[len(prefix) :]  # noqa: E203
             raise MemcacheError(line.rstrip().decode("utf-8"))
 
         flags = []

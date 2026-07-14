@@ -61,45 +61,33 @@ Async usage mirrors the sync API with `AsyncMemcache` and `await`.
 > ]
 > ```
 
-`MetaClient` exposes the full power of memcached's
-[meta protocol](https://github.com/memcached/memcached/blob/master/doc/protocol.txt),
-including flags unavailable through the basic API.
+`MetaClient` is an intent-oriented API for memcached's meta protocol. Common methods expose operations such as conditional reads, leases and conditional writes without exposing wire flags. Every result has an explicit status.
 
 ```python
-from memcache.experiment import MetaClient
+from memcache.experiment import Get, GetStatus, Meta, MetaClient, Set
 
-client = MetaClient(("localhost", 11211))
+with MetaClient(("localhost", 11211)) as client:
+    client.set("key", {"message": "value"}, ttl=60)
 
-# get returns a GetResult with rich metadata
-result = client.get(
-    "key",
-    with_cas=True,
-    with_ttl=True,
-    with_hit_before=True,
-)
-if result is not None:
-    print(result.value)
-    print(result.cas_token)
-    print(result.ttl)
-    print(result.hit_before)
+    result = client.get("key", meta=Meta.CAS | Meta.TTL | Meta.SIZE)
+    if result.status is GetStatus.HIT:
+        print(result.value, result.item.cas, result.item.ttl)
 
-# Atomic get-and-touch (update TTL in the same round-trip)
-value = client.gat("key", expire=120)
+    # Batch operations use a quiet pipeline and preserve input order.
+    results = client.batch([Get("key"), Get("missing"), Set("other", b"x")])
 
-# Store only if key does not exist
-client.add("key", "value", expire=60)
+    # C only transfers the value if it changed, in one round trip.
+    latest = client.get("key", unless_cas=result.item.cas)
+    if latest.status is GetStatus.UNCHANGED:
+        use_local_copy()
 
-# Store only if key already exists
-client.replace("key", "new_value")
-
-# Increment with auto-create if missing
-client.incr("counter", delta=1, initial=0, initial_ttl=3600)
-
-# Flush with a delay
-client.flush_all(delay=30)
+    # Atomic cache-miss lease. Only one caller receives GRANTED.
+    lease = client.get_with_lease("report", lease_ttl=30)
+    if lease.lease_state.name == "GRANTED":
+        lease.fulfill(build_report(), ttl=300)
 ```
 
-`AsyncMetaClient` is the async counterpart with the same interface.
+`AsyncMetaClient` has the same concepts and call shape; its methods and lease `fulfill()` are awaited. Protocol experts can use `client.raw.execute(...)` as a framing-safe escape hatch. See `docs/meta-client-design.md` for the complete state and failure model.
 
 ## About the Project
 

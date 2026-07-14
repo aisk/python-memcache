@@ -4,7 +4,9 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 from .async_connection import AsyncConnection, AsyncPool  # noqa: F401 re-export
 from .connection import Addr
 from .errors import MemcacheError
+from .experiment import IfCas, Meta
 from .experiment.async_meta_client import AsyncMetaClient
+from .experiment.result import GetStatus, MutationStatus
 from .meta_command import MetaCommand, MetaResult
 from .serialize import dump, load, DumpFunc, LoadFunc
 
@@ -75,11 +77,11 @@ class AsyncMemcache:
     async def set(
         self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> None:
-        await self._meta.set(key, value, expire=expire)
+        await self._meta.set(key, value, ttl=expire)
 
     async def get(self, key: Union[bytes, str]) -> Optional[Any]:
         r = await self._meta.get(key)
-        return r.value if r is not None else None
+        return r.value if r.status is GetStatus.HIT else None
 
     async def gets(self, key: Union[bytes, str]) -> Optional[Tuple[Any, int]]:
         """
@@ -88,8 +90,8 @@ class AsyncMemcache:
         :param key: The key to retrieve
         :return: A tuple of (value, cas_token) or None if key doesn't exist
         """
-        r = await self._meta.get(key, with_cas=True)
-        if r is None:
+        r = await self._meta.get(key, meta=Meta.CAS)
+        if r.status is not GetStatus.HIT:
             return None
         if r.cas_token is None:
             raise MemcacheError("CAS token not found in response")
@@ -112,38 +114,61 @@ class AsyncMemcache:
         :param expire: Optional expiration time in seconds
         :raises MemcacheError: If the CAS token doesn't match or other error occurs
         """
-        ok = await self._meta.cas(key, value, cas_token, expire=expire)
-        if not ok:
+        result = await self._meta.set(
+            key,
+            value,
+            ttl=expire,
+            condition=IfCas(cas_token),
+        )
+        if result.status is not MutationStatus.STORED:
             raise MemcacheError("CAS operation failed: token mismatch or other error")
 
     async def delete(self, key: Union[bytes, str]) -> bool:
-        return await self._meta.delete(key)
+        return (await self._meta.delete(key)).status is MutationStatus.STORED
 
     async def touch(self, key: Union[bytes, str], expire: int) -> bool:
-        return await self._meta.touch(key, expire)
+        return (await self._meta.touch(key, expire)).status is MutationStatus.STORED
 
     async def add(
         self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> bool:
-        return await self._meta.add(key, value, expire=expire)
+        return (
+            await self._meta.add(key, value, ttl=expire)
+        ).status is MutationStatus.STORED
 
     async def replace(
         self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> bool:
-        return await self._meta.replace(key, value, expire=expire)
+        return (
+            await self._meta.replace(key, value, ttl=expire)
+        ).status is MutationStatus.STORED
 
     async def append(self, key: Union[bytes, str], value: Any) -> bool:
-        return await self._meta.append(key, value)
+        return (
+            await self._meta.append_bytes(key, value)
+        ).status is MutationStatus.STORED
 
     async def prepend(self, key: Union[bytes, str], value: Any) -> bool:
-        return await self._meta.prepend(key, value)
+        return (
+            await self._meta.prepend_bytes(key, value)
+        ).status is MutationStatus.STORED
 
     async def get_many(self, keys: List[Union[bytes, str]]) -> Dict[str, Any]:
         results = await self._meta.get_many(keys)
-        return {k: v.value for k, v in results.items()}
+        return {
+            r.key if isinstance(r.key, str) else r.key.decode("latin-1"): r.value
+            for r in results
+            if r.status is GetStatus.HIT
+        }
 
     async def incr(self, key: Union[bytes, str], value: int = 1) -> int:
-        return await self._meta.incr(key, value)
+        result = await self._meta.increment(key, value)
+        if result.status is not MutationStatus.STORED or result.value is None:
+            raise MemcacheError("key not found")
+        return result.value
 
     async def decr(self, key: Union[bytes, str], value: int = 1) -> int:
-        return await self._meta.decr(key, value)
+        result = await self._meta.decrement(key, value)
+        if result.status is not MutationStatus.STORED or result.value is None:
+            raise MemcacheError("key not found")
+        return result.value
