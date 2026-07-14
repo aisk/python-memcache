@@ -1,9 +1,12 @@
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
+import hashring
+
 from .connection import Addr, Connection, Pool  # re-export for backward compat
 from .errors import MemcacheError
 from .experiment.meta_client import MetaClient
+from .experiment.result import GetStatus, Meta, MutationStatus
 from .meta_command import MetaCommand, MetaResult
 from .serialize import dump, load, DumpFunc, LoadFunc
 
@@ -57,10 +60,22 @@ class Memcache:
             username=username,
             password=password,
         )
+        compat_addr = addr or ("localhost", 11211)
+        addresses = compat_addr if isinstance(compat_addr, list) else [compat_addr]
+        pools = []
+        for server in addresses:
+
+            def make(server: Addr = server) -> Connection:
+                return Connection(server, username=username, password=password)
+
+            pools.append(Pool(make, max_size=pool_size, timeout=pool_timeout))
+        self._compat_connections = hashring.HashRing(pools)
 
     @contextmanager
     def _get_connection(self, key: Union[str, bytes]) -> Iterator[Connection]:
-        with self._meta._get_connection(key) as conn:
+        routing_key = key if isinstance(key, str) else key.decode("latin-1")
+        pool = self._compat_connections.get_node(routing_key)
+        with pool.get() as conn:
             yield conn
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
@@ -72,11 +87,11 @@ class Memcache:
     def set(
         self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> None:
-        self._meta.set(key, value, expire=expire)
+        self._meta.set(key, value, ttl=expire)
 
     def get(self, key: Union[bytes, str]) -> Optional[Any]:
         r = self._meta.get(key)
-        return r.value if r is not None else None
+        return r.value if r.status is GetStatus.HIT else None
 
     def gets(self, key: Union[bytes, str]) -> Optional[Tuple[Any, int]]:
         """
@@ -85,8 +100,8 @@ class Memcache:
         :param key: The key to retrieve
         :return: A tuple of (value, cas_token) or None if key doesn't exist
         """
-        r = self._meta.get(key, with_cas=True)
-        if r is None:
+        r = self._meta.get(key, meta=Meta.CAS)
+        if r.status is not GetStatus.HIT:
             return None
         if r.cas_token is None:
             raise MemcacheError("CAS token not found in response")
@@ -109,38 +124,50 @@ class Memcache:
         :param expire: Optional expiration time in seconds
         :raises MemcacheError: If the CAS token doesn't match or other error occurs
         """
-        ok = self._meta.cas(key, value, cas_token, expire=expire)
-        if not ok:
+        result = self._meta.cas(key, value, cas_token, ttl=expire)
+        if result.status is not MutationStatus.STORED:
             raise MemcacheError("CAS operation failed: token mismatch or other error")
 
     def delete(self, key: Union[bytes, str]) -> bool:
-        return self._meta.delete(key)
+        return self._meta.delete(key).status is MutationStatus.STORED
 
     def touch(self, key: Union[bytes, str], expire: int) -> bool:
-        return self._meta.touch(key, expire)
+        return self._meta.touch(key, expire).status is MutationStatus.STORED
 
     def add(
         self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> bool:
-        return self._meta.add(key, value, expire=expire)
+        return self._meta.add(key, value, ttl=expire).status is MutationStatus.STORED
 
     def replace(
         self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> bool:
-        return self._meta.replace(key, value, expire=expire)
+        return (
+            self._meta.replace(key, value, ttl=expire).status is MutationStatus.STORED
+        )
 
     def append(self, key: Union[bytes, str], value: Any) -> bool:
-        return self._meta.append(key, value)
+        return self._meta.append_bytes(key, value).status is MutationStatus.STORED
 
     def prepend(self, key: Union[bytes, str], value: Any) -> bool:
-        return self._meta.prepend(key, value)
+        return self._meta.prepend_bytes(key, value).status is MutationStatus.STORED
 
     def get_many(self, keys: List[Union[bytes, str]]) -> Dict[str, Any]:
         results = self._meta.get_many(keys)
-        return {k: v.value for k, v in results.items()}
+        return {
+            r.key if isinstance(r.key, str) else r.key.decode("latin-1"): r.value
+            for r in results
+            if r.status is GetStatus.HIT
+        }
 
     def incr(self, key: Union[bytes, str], value: int = 1) -> int:
-        return self._meta.incr(key, value)
+        result = self._meta.increment(key, value)
+        if result.status is not MutationStatus.STORED or result.value is None:
+            raise MemcacheError("key not found")
+        return result.value
 
     def decr(self, key: Union[bytes, str], value: int = 1) -> int:
-        return self._meta.decr(key, value)
+        result = self._meta.decrement(key, value)
+        if result.status is not MutationStatus.STORED or result.value is None:
+            raise MemcacheError("key not found")
+        return result.value

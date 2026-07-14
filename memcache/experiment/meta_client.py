@@ -1,516 +1,261 @@
-from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional, Union
+from __future__ import annotations
 
-import hashring
+import asyncio
+import concurrent.futures
+import threading
+from typing import Any, Coroutine, List, Optional, Sequence, TypeVar
 
-from ..connection import Addr, Connection, Pool
-from ..errors import MemcacheError
 from ..meta_command import MetaCommand, MetaResult
-from ..serialize import dump, load, DumpFunc, LoadFunc
-from .result import GetResult
+from .async_meta_client import AsyncMetaClient
+from .operation import ABSENT, PRESENT, Delete, Get, IfCas, Increment, Operation, Set
+from .result import (
+    ArithmeticResult,
+    BatchResult,
+    GetResult,
+    Key,
+    LeaseResult,
+    Meta,
+    MutationResult,
+)
 
 
-def _parse_flags(flags: List[bytes]) -> Dict[str, Any]:
-    result: Dict[str, Any] = {}
-    for flag in flags:
-        if not flag:
-            continue
-        prefix = chr(flag[0])
-        rest = flag[1:]
-        if prefix == "f":
-            result["client_flags"] = int(rest)
-        elif prefix == "c":
-            result["cas_token"] = int(rest)
-        elif prefix == "t":
-            result["ttl"] = int(rest)
-        elif prefix == "l":
-            result["last_access"] = int(rest)
-        elif prefix == "s":
-            result["size"] = int(rest)
-        elif prefix == "h":
-            result["hit_before"] = int(rest) != 0
-        elif prefix == "W":
-            result["won_recache"] = True
-        elif prefix == "X":
-            result["is_stale"] = True
-        elif prefix == "Z":
-            result["already_won"] = True
-        elif prefix == "k":
-            result["key"] = rest.decode("utf-8")
-    return result
+R = TypeVar("R")
+
+
+class RawClient:
+    def __init__(self, client: "MetaClient") -> None:
+        self._client = client
+
+    def execute(self, **command: Any) -> MetaResult:
+        return self._client._run(self._client._async.raw.execute(**command))
+
+    def batch(
+        self, commands: Sequence[MetaCommand], *, timeout: Optional[float] = None
+    ) -> List[MetaResult]:
+        return self._client._run(
+            self._client._async.raw.batch(commands, timeout=timeout)
+        )
 
 
 class MetaClient:
-    """
-    Memcache client with full meta protocol capability.
+    """Synchronous view over the sole async protocol implementation."""
 
-    Exposes the complete meta protocol (mg/ms/md/ma commands) with all flags.
-    Access via ``from memcache.experiment import MetaClient``.
-    """
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._thread = threading.Thread(
+            target=self._serve_loop,
+            name="memcache-meta-client",
+            daemon=True,
+        )
+        self._thread.start()
+        self._ready.wait()
+        self._async = AsyncMetaClient(*args, **kwargs)
+        self.raw = RawClient(self)
+        self._closed = False
 
-    def __init__(
+    def _serve_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._ready.set()
+        self._loop.run_forever()
+        self._loop.close()
+
+    def _run(self, awaitable: Coroutine[Any, Any, R]) -> R:
+        if self._closed:
+            if hasattr(awaitable, "close"):
+                awaitable.close()
+            raise RuntimeError("client is closed")
+        future: concurrent.futures.Future[R] = asyncio.run_coroutine_threadsafe(
+            awaitable, self._loop
+        )
+        return future.result()
+
+    def __enter__(self) -> "MetaClient":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._run(self._async.close())
+        self._closed = True
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join()
+
+    def execute_meta_command(
+        self, command: MetaCommand, *, timeout: Optional[float] = None
+    ) -> MetaResult:
+        return self._run(self._async.execute_meta_command(command, timeout=timeout))
+
+    def batch(
         self,
-        addr: Union[Addr, List[Addr], None] = None,
+        operations: Sequence[Operation],
         *,
-        pool_size: Optional[int] = 23,
-        pool_timeout: Optional[int] = 1,
-        load_func: LoadFunc = load,
-        dump_func: DumpFunc = dump,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-    ):
-        self._load = load_func
-        self._dump = dump_func
-
-        addr = addr or ("localhost", 11211)
-        if isinstance(addr, list):
-            addrs: List[Addr] = addr
-            nodes: List[Pool] = []
-            for a in addrs:
-                def _make(a: Addr = a) -> Connection:
-                    return Connection(
-                        a,
-                        username=username,
-                        password=password,
-                    )
-                nodes.append(Pool(_make, max_size=pool_size, timeout=pool_timeout))
-            self._connections = hashring.HashRing(nodes)
-        elif isinstance(addr, tuple):
-            a_single: Addr = addr
-
-            def _make_single() -> Connection:
-                return Connection(
-                    a_single,
-                    username=username,
-                    password=password,
-                )
-            self._connections = hashring.HashRing(
-                [Pool(_make_single, max_size=pool_size, timeout=pool_timeout)]
-            )
-        else:
-            raise TypeError("invalid type for addr")
-
-    @contextmanager
-    def _get_connection(self, key: Union[str, bytes]) -> Iterator[Connection]:
-        if isinstance(key, bytes):
-            # latin-1 maps every byte 1:1 so binary keys never raise here.
-            key = key.decode("latin-1")
-        pool = self._connections.get_node(key)
-        with pool.get() as connection:
-            yield connection
-
-    @staticmethod
-    def _to_bytes(key: Union[str, bytes]) -> bytes:
-        if isinstance(key, str):
-            return key.encode()
-        return key
-
-    def execute_meta_command(self, command: MetaCommand) -> MetaResult:
-        with self._get_connection(command.key) as connection:
-            return connection.execute_meta_command(command)
-
-    # ------------------------------------------------------------------ #
-    # Meta Get (mg)                                                      #
-    # ------------------------------------------------------------------ #
+        timeout: Optional[float] = None,
+    ) -> BatchResult:
+        return self._run(self._async.batch(operations, timeout=timeout))
 
     def get(
         self,
-        key: Union[str, bytes],
+        key: Key,
         *,
-        with_cas: bool = False,
-        with_ttl: bool = False,
-        with_last_access: bool = False,
-        with_size: bool = False,
-        with_hit_before: bool = False,
-        update_ttl: Optional[int] = None,
+        meta: Meta = Meta.NONE,
+        touch: Optional[int] = None,
         no_lru_bump: bool = False,
-        vivify_on_miss_ttl: Optional[int] = None,
-        recache_ttl_threshold: Optional[int] = None,
-        check_cas: Optional[int] = None,
-    ) -> Optional[GetResult[Any]]:
-        key_bytes = self._to_bytes(key)
-        flags: List[bytes] = [b"v", b"f"]
-        if with_cas:
-            flags.append(b"c")
-        if with_ttl:
-            flags.append(b"t")
-        if with_last_access:
-            flags.append(b"l")
-        if with_size:
-            flags.append(b"s")
-        if with_hit_before:
-            flags.append(b"h")
-        if update_ttl is not None:
-            flags.append(b"T%d" % update_ttl)
-        if no_lru_bump:
-            flags.append(b"u")
-        if vivify_on_miss_ttl is not None:
-            flags.append(b"N%d" % vivify_on_miss_ttl)
-        if recache_ttl_threshold is not None:
-            flags.append(b"R%d" % recache_ttl_threshold)
-        if check_cas is not None:
-            flags.append(b"C%d" % check_cas)
-
-        command = MetaCommand(cm=b"mg", key=key_bytes, flags=flags)
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
-
-        if result.rc == b"EN":
-            return None
-
-        parsed = _parse_flags(result.flags)
-
-        gr: GetResult[Any] = GetResult()
-        gr.is_stale = parsed.get("is_stale", False)
-        gr.won_recache = parsed.get("won_recache", False)
-        gr.already_won = parsed.get("already_won", False)
-        if with_cas:
-            gr.cas_token = parsed.get("cas_token")
-        if with_ttl:
-            gr.ttl = parsed.get("ttl")
-        if with_last_access:
-            gr.last_access = parsed.get("last_access")
-        if with_size:
-            gr.size = parsed.get("size")
-        if with_hit_before:
-            gr.hit_before = parsed.get("hit_before")
-        if "key" in parsed:
-            gr.key = parsed["key"]
-
-        if result.value is not None and len(result.value) > 0:
-            client_flags = parsed.get("client_flags", 0)
-            gr.value = self._load(key_bytes, result.value, client_flags)
-
-        return gr
-
-    def touch(self, key: Union[str, bytes], expire: int) -> bool:
-        """Update the TTL of a key without returning its value."""
-        key_bytes = self._to_bytes(key)
-        command = MetaCommand(
-            cm=b"mg",
-            key=key_bytes,
-            flags=[b"T%d" % expire],
+        unless_cas: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> GetResult[Any]:
+        return self._run(
+            self._async.get(
+                key,
+                meta=meta,
+                touch=touch,
+                no_lru_bump=no_lru_bump,
+                unless_cas=unless_cas,
+                timeout=timeout,
+            )
         )
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
-        return result.rc != b"EN"
+
+    def inspect(
+        self,
+        key: Key,
+        *,
+        meta: Meta = Meta.CAS | Meta.TTL | Meta.SIZE,
+        no_lru_bump: bool = True,
+        timeout: Optional[float] = None,
+    ) -> GetResult[Any]:
+        return self._run(
+            self._async.inspect(
+                key, meta=meta, no_lru_bump=no_lru_bump, timeout=timeout
+            )
+        )
+
+    def get_with_lease(
+        self,
+        key: Key,
+        *,
+        lease_ttl: int,
+        refresh_before: Optional[int] = None,
+        meta: Meta = Meta.NONE,
+        timeout: Optional[float] = None,
+    ) -> LeaseResult[Any]:
+        async_result = self._run(
+            self._async.get_with_lease(
+                key,
+                lease_ttl=lease_ttl,
+                refresh_before=refresh_before,
+                meta=meta,
+                timeout=timeout,
+            )
+        )
+        # Replace the async cursor callback with a blocking callback while
+        # retaining all response data.
+        async_fulfill = async_result._fulfill
+        async_result._fulfill = lambda *a, **kw: self._run(async_fulfill(*a, **kw))
+        return async_result
 
     def get_many(
         self,
-        keys: List[Union[str, bytes]],
-    ) -> Dict[str, GetResult[Any]]:
-        """Retrieve multiple keys; missing keys are omitted from the result."""
-        result: Dict[str, GetResult[Any]] = {}
-        for key in keys:
-            key_str = key if isinstance(key, str) else key.decode("latin-1")
-            gr = self.get(key)
-            if gr is not None:
-                result[key_str] = gr
-        return result
-
-    # ------------------------------------------------------------------ #
-    # Meta Set (ms)                                                      #
-    # ------------------------------------------------------------------ #
+        keys: Sequence[Key],
+        *,
+        meta: Meta = Meta.NONE,
+        timeout: Optional[float] = None,
+    ) -> BatchResult:
+        return self._run(self._async.get_many(keys, meta=meta, timeout=timeout))
 
     def set(
         self,
-        key: Union[str, bytes],
+        key: Key,
         value: Any,
         *,
-        expire: Optional[int] = None,
-    ) -> None:
-        key_bytes = self._to_bytes(key)
-        raw_value, client_flags = self._dump(key_bytes, value)
-        flags: List[bytes] = [b"F%d" % client_flags]
-        if expire is not None:
-            flags.append(b"T%d" % expire)
-
-        command = MetaCommand(
-            cm=b"ms",
-            key=key_bytes,
-            datalen=len(raw_value),
-            flags=flags,
-            value=raw_value,
+        ttl: Optional[int] = None,
+        condition: Any = None,
+        version: Optional[int] = None,
+        return_cas: bool = False,
+        timeout: Optional[float] = None,
+    ) -> MutationResult:
+        return self._run(
+            self._async.set(
+                key,
+                value,
+                ttl=ttl,
+                condition=condition,
+                version=version,
+                return_cas=return_cas,
+                timeout=timeout,
+            )
         )
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
 
-        if result.rc != b"HD":
-            raise MemcacheError(f"set failed: {result.rc.decode()}")
+    def add(self, key: Key, value: Any, **options: Any) -> MutationResult:
+        options["condition"] = ABSENT
+        return self.set(key, value, **options)
 
-    def add(
-        self,
-        key: Union[str, bytes],
-        value: Any,
-        *,
-        expire: Optional[int] = None,
-    ) -> bool:
-        """Store only if key does not already exist. Returns True on success."""
-        key_bytes = self._to_bytes(key)
-        raw_value, client_flags = self._dump(key_bytes, value)
-        flags: List[bytes] = [b"ME", b"F%d" % client_flags]
-        if expire is not None:
-            flags.append(b"T%d" % expire)
-
-        command = MetaCommand(
-            cm=b"ms",
-            key=key_bytes,
-            datalen=len(raw_value),
-            flags=flags,
-            value=raw_value,
-        )
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
-
-        if result.rc == b"HD":
-            return True
-        if result.rc == b"NS":
-            return False
-        raise MemcacheError(f"add failed: {result.rc.decode()}")
-
-    def replace(
-        self,
-        key: Union[str, bytes],
-        value: Any,
-        *,
-        expire: Optional[int] = None,
-    ) -> bool:
-        """Store only if key already exists. Returns True on success."""
-        key_bytes = self._to_bytes(key)
-        raw_value, client_flags = self._dump(key_bytes, value)
-        flags: List[bytes] = [b"MR", b"F%d" % client_flags]
-        if expire is not None:
-            flags.append(b"T%d" % expire)
-
-        command = MetaCommand(
-            cm=b"ms",
-            key=key_bytes,
-            datalen=len(raw_value),
-            flags=flags,
-            value=raw_value,
-        )
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
-
-        if result.rc == b"HD":
-            return True
-        if result.rc == b"NS":
-            return False
-        raise MemcacheError(f"replace failed: {result.rc.decode()}")
-
-    def append(
-        self,
-        key: Union[str, bytes],
-        value: Any,
-        *,
-        vivify_ttl: Optional[int] = None,
-    ) -> bool:
-        """Append value to an existing key. Returns True on success."""
-        key_bytes = self._to_bytes(key)
-        raw_value, client_flags = self._dump(key_bytes, value)
-        flags: List[bytes] = [b"MA", b"F%d" % client_flags]
-        if vivify_ttl is not None:
-            flags.append(b"N%d" % vivify_ttl)
-
-        command = MetaCommand(
-            cm=b"ms",
-            key=key_bytes,
-            datalen=len(raw_value),
-            flags=flags,
-            value=raw_value,
-        )
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
-
-        if result.rc == b"HD":
-            return True
-        if result.rc == b"NS":
-            return False
-        raise MemcacheError(f"append failed: {result.rc.decode()}")
-
-    def prepend(
-        self,
-        key: Union[str, bytes],
-        value: Any,
-        *,
-        vivify_ttl: Optional[int] = None,
-    ) -> bool:
-        """Prepend value to an existing key. Returns True on success."""
-        key_bytes = self._to_bytes(key)
-        raw_value, client_flags = self._dump(key_bytes, value)
-        flags: List[bytes] = [b"MP", b"F%d" % client_flags]
-        if vivify_ttl is not None:
-            flags.append(b"N%d" % vivify_ttl)
-
-        command = MetaCommand(
-            cm=b"ms",
-            key=key_bytes,
-            datalen=len(raw_value),
-            flags=flags,
-            value=raw_value,
-        )
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
-
-        if result.rc == b"HD":
-            return True
-        if result.rc == b"NS":
-            return False
-        raise MemcacheError(f"prepend failed: {result.rc.decode()}")
+    def replace(self, key: Key, value: Any, **options: Any) -> MutationResult:
+        options["condition"] = PRESENT
+        return self.set(key, value, **options)
 
     def cas(
-        self,
-        key: Union[str, bytes],
-        value: Any,
-        cas_token: int,
-        *,
-        expire: Optional[int] = None,
-    ) -> bool:
-        """Compare-and-swap. Returns True on success, False on CAS conflict."""
-        key_bytes = self._to_bytes(key)
-        raw_value, client_flags = self._dump(key_bytes, value)
-        flags: List[bytes] = [b"F%d" % client_flags, b"C%d" % cas_token]
-        if expire is not None:
-            flags.append(b"T%d" % expire)
+        self, key: Key, value: Any, cas_token: int, **options: Any
+    ) -> MutationResult:
+        options["condition"] = IfCas(cas_token)
+        return self.set(key, value, **options)
 
-        command = MetaCommand(
-            cm=b"ms",
-            key=key_bytes,
-            datalen=len(raw_value),
-            flags=flags,
-            value=raw_value,
-        )
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
+    def append_bytes(self, key: Key, value: bytes, **options: Any) -> MutationResult:
+        return self._run(self._async.append_bytes(key, value, **options))
 
-        if result.rc == b"HD":
-            return True
-        if result.rc in (b"EX", b"NF"):
-            return False
-        raise MemcacheError(f"cas failed: {result.rc.decode()}")
-
-    # ------------------------------------------------------------------ #
-    # Meta Delete (md)                                                   #
-    # ------------------------------------------------------------------ #
+    def prepend_bytes(self, key: Key, value: bytes, **options: Any) -> MutationResult:
+        return self._run(self._async.prepend_bytes(key, value, **options))
 
     def delete(
         self,
-        key: Union[str, bytes],
+        key: Key,
         *,
-        cas_token: Optional[int] = None,
-    ) -> bool:
-        """Delete a key. Returns True on success, False if key not found."""
-        key_bytes = self._to_bytes(key)
-        flags: List[bytes] = []
-        if cas_token is not None:
-            flags.append(b"C%d" % cas_token)
-
-        command = MetaCommand(cm=b"md", key=key_bytes, flags=flags)
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
-
-        if result.rc == b"HD":
-            return True
-        if result.rc in (b"NF", b"EX"):
-            return False
-        raise MemcacheError(f"delete failed: {result.rc.decode()}")
+        condition: Optional[IfCas] = None,
+        timeout: Optional[float] = None,
+    ) -> MutationResult:
+        return self._run(self._async.delete(key, condition=condition, timeout=timeout))
 
     def invalidate(
         self,
-        key: Union[str, bytes],
+        key: Key,
         *,
-        stale_ttl: Optional[int] = None,
-        cas_token: Optional[int] = None,
-    ) -> bool:
-        """Mark a key as stale (stale-while-revalidate pattern)."""
-        key_bytes = self._to_bytes(key)
-        flags: List[bytes] = [b"I"]
-        if stale_ttl is not None:
-            flags.append(b"T%d" % stale_ttl)
-        if cas_token is not None:
-            flags.append(b"C%d" % cas_token)
+        stale_for: Optional[int] = None,
+        condition: Optional[IfCas] = None,
+        timeout: Optional[float] = None,
+    ) -> MutationResult:
+        return self._run(
+            self._async.invalidate(
+                key,
+                stale_for=stale_for,
+                condition=condition,
+                timeout=timeout,
+            )
+        )
 
-        command = MetaCommand(cm=b"md", key=key_bytes, flags=flags)
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
+    def increment(self, key: Key, delta: int = 1, **options: Any) -> ArithmeticResult:
+        return self._run(self._async.increment(key, delta, **options))
 
-        if result.rc == b"HD":
-            return True
-        if result.rc in (b"NF", b"EX"):
-            return False
-        raise MemcacheError(f"invalidate failed: {result.rc.decode()}")
+    def decrement(self, key: Key, delta: int = 1, **options: Any) -> ArithmeticResult:
+        return self._run(self._async.decrement(key, delta, **options))
 
-    # ------------------------------------------------------------------ #
-    # Meta Arithmetic (ma)                                               #
-    # ------------------------------------------------------------------ #
-
-    def incr(
-        self,
-        key: Union[str, bytes],
-        delta: int = 1,
-        *,
-        initial: Optional[int] = None,
-        initial_ttl: Optional[int] = None,
-        update_ttl: Optional[int] = None,
-    ) -> int:
-        """Increment counter. Raises MemcacheError if key missing and no initial."""
-        key_bytes = self._to_bytes(key)
-        flags: List[bytes] = [b"D%d" % delta, b"v"]
-        if initial is not None:
-            flags.append(b"J%d" % initial)
-            if initial_ttl is not None:
-                flags.append(b"N%d" % initial_ttl)
-        if update_ttl is not None:
-            flags.append(b"T%d" % update_ttl)
-
-        command = MetaCommand(cm=b"ma", key=key_bytes, flags=flags)
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
-
-        if result.rc == b"NF":
-            raise MemcacheError("key not found")
-        if result.rc != b"VA":
-            raise MemcacheError(f"incr failed: {result.rc.decode()}")
-        if result.value is None:
-            raise MemcacheError("incr: no value returned")
-        return int(result.value)
-
-    def decr(
-        self,
-        key: Union[str, bytes],
-        delta: int = 1,
-        *,
-        initial: Optional[int] = None,
-        initial_ttl: Optional[int] = None,
-        update_ttl: Optional[int] = None,
-    ) -> int:
-        """Decrement counter (floor 0). Raises MemcacheError if key missing."""
-        key_bytes = self._to_bytes(key)
-        flags: List[bytes] = [b"D%d" % delta, b"MD", b"v"]
-        if initial is not None:
-            flags.append(b"J%d" % initial)
-            if initial_ttl is not None:
-                flags.append(b"N%d" % initial_ttl)
-        if update_ttl is not None:
-            flags.append(b"T%d" % update_ttl)
-
-        command = MetaCommand(cm=b"ma", key=key_bytes, flags=flags)
-        with self._get_connection(key_bytes) as connection:
-            result = connection.execute_meta_command(command)
-
-        if result.rc == b"NF":
-            raise MemcacheError("key not found")
-        if result.rc != b"VA":
-            raise MemcacheError(f"decr failed: {result.rc.decode()}")
-        if result.value is None:
-            raise MemcacheError("decr: no value returned")
-        return int(result.value)
-
-    # ------------------------------------------------------------------ #
-    # Other                                                              #
-    # ------------------------------------------------------------------ #
+    def touch(
+        self, key: Key, ttl: int, *, timeout: Optional[float] = None
+    ) -> MutationResult:
+        return self._run(self._async.touch(key, ttl, timeout=timeout))
 
     def flush_all(self, delay: int = 0) -> None:
-        for pool in self._connections.nodes:
-            with pool.get() as connection:
-                connection.flush_all(delay)
+        self._run(self._async.flush_all(delay))
+
+
+__all__ = [
+    "ABSENT",
+    "PRESENT",
+    "Delete",
+    "Get",
+    "IfCas",
+    "Increment",
+    "MetaClient",
+    "Set",
+]

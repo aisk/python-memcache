@@ -62,12 +62,9 @@ class Connection:
             raise MemcacheError(response.rstrip(NEWLINE))
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
-        try:
-            return self._execute_meta_command(command)
-        except (IndexError, ConnectionResetError, BrokenPipeError):
-            # This happens when connection is closed by memcached.
-            self._connect()
-            return self._execute_meta_command(command)
+        # Never reconnect and replay here. Once a write has started, a lost
+        # response makes the outcome ambiguous (especially for ms/ma).
+        return self._execute_meta_command(command)
 
     def _execute_meta_command(self, command: MetaCommand) -> MetaResult:
         self.stream.write(command.dump_header())
@@ -106,16 +103,26 @@ class Pool:
     def get(self) -> Iterator[Connection]:
         try:
             connection = self._connections.get_nowait()
-            yield connection
-            self._connections.put(connection)
         except queue.Empty:
             if self._max_size and self._size >= self._max_size:
                 connection = self._connections.get(timeout=self._timeout)
-                yield connection
-                self._connections.put(connection)
             else:
                 with self._lock:
                     self._size += 1
-                connection = self._create_connection()
-                yield connection
-                self._connections.put(connection)
+                try:
+                    connection = self._create_connection()
+                except BaseException:
+                    with self._lock:
+                        self._size -= 1
+                    raise
+        try:
+            yield connection
+        except BaseException:
+            try:
+                connection.close()
+            finally:
+                with self._lock:
+                    self._size -= 1
+            raise
+        else:
+            self._connections.put(connection)

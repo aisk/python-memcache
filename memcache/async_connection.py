@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Callable, Optional, Tuple
+from typing import AsyncIterator, Callable, List, Optional, Tuple
 
 import anyio
 from anyio.streams.buffered import BufferedByteReceiveStream
@@ -27,6 +27,12 @@ class AsyncConnection:
         self.reader = BufferedByteReceiveStream(self.writer)
         await self._auth()
         self._connected = True
+
+    async def close(self) -> None:
+        self._connected = False
+        writer = getattr(self, "writer", None)
+        if writer is not None:
+            await writer.aclose()
 
     async def _auth(self) -> None:
         if self._username is None or self._password is None:
@@ -57,9 +63,9 @@ class AsyncConnection:
     async def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         try:
             return await self._execute_meta_command(command)
-        except (IndexError, ConnectionResetError, BrokenPipeError):
+        except BaseException:
             self._connected = False
-            return await self._execute_meta_command(command)
+            raise
 
     async def _execute_meta_command(self, command: MetaCommand) -> MetaResult:
         if not self._connected:
@@ -69,6 +75,37 @@ class AsyncConnection:
         if command.value:
             await self.writer.send(command.value + b"\r\n")
         return await self._receive_meta_result()
+
+    async def execute_pipeline(self, commands: List[MetaCommand]) -> List[MetaResult]:
+        """Write a quiet pipeline and read through its ``mn`` barrier.
+
+        ``PipelineError.written`` is conservative: an operation is counted as
+        written as soon as its first send starts, since a failed send may have
+        transferred an arbitrary prefix to the kernel.
+        """
+        written = 0
+        responses: List[MetaResult] = []
+        try:
+            if not self._connected:
+                await self._connect()
+            for command in commands:
+                written += 1
+                await self.writer.send(command.dump())
+            await self.writer.send(b"mn\r\n")
+            while True:
+                line = await self.reader.receive_until(b"\r\n", max_bytes=1024)
+                if line == b"MN":
+                    return responses
+                result = MetaResult.load_header(line)
+                if result.rc == b"VA":
+                    if result.datalen is None:
+                        raise MemcacheError("invalid response: missing datalen")
+                    result.value = await self.reader.receive_exactly(result.datalen)
+                    await self.reader.receive_exactly(2)
+                responses.append(result)
+        except BaseException as exc:
+            self._connected = False
+            raise PipelineError(written, responses, exc)
 
     async def _receive_meta_result(self) -> MetaResult:
         header_line = await self.reader.receive_until(b"\r\n", max_bytes=1024)
@@ -81,6 +118,19 @@ class AsyncConnection:
             await self.reader.receive_exactly(2)  # read the "\r\n"
 
         return result
+
+
+class PipelineError(Exception):
+    def __init__(
+        self,
+        written: int,
+        responses: List[MetaResult],
+        cause: BaseException,
+    ) -> None:
+        super().__init__(str(cause))
+        self.written = written
+        self.responses = responses
+        self.cause = cause
 
 
 class AsyncPool:
@@ -101,18 +151,37 @@ class AsyncPool:
     async def get(self) -> AsyncIterator[AsyncConnection]:
         try:
             connection = self._connections.get_nowait()
-            yield connection
-            await self._connections.put(connection)
         except asyncio.QueueEmpty:
             if self._max_size and self._size >= self._max_size:
                 connection = await asyncio.wait_for(
                     self._connections.get(), timeout=self._timeout
                 )
-                yield connection
-                await self._connections.put(connection)
             else:
                 async with self._lock:
                     self._size += 1
-                connection = self._create_connection()
-                yield connection
-                await self._connections.put(connection)
+                try:
+                    connection = self._create_connection()
+                except BaseException:
+                    async with self._lock:
+                        self._size -= 1
+                    raise
+        try:
+            yield connection
+        except BaseException:
+            try:
+                await connection.close()
+            finally:
+                async with self._lock:
+                    self._size -= 1
+            raise
+        else:
+            await self._connections.put(connection)
+
+    async def close(self) -> None:
+        while True:
+            try:
+                connection = self._connections.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            await connection.close()
+        self._size = 0
