@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
@@ -47,7 +48,11 @@ class Get:
 @dataclass(frozen=True)
 class Set:
     key: Key
-    value: Any
+    if sys.version_info < (3, 9):
+        # Python 3.8's mypy rejects Any in dataclass-generated methods.
+        value: object
+    else:
+        value: Any
     ttl: Optional[int] = None
     condition: Optional[Condition] = None
     version: Optional[int] = None
