@@ -2,9 +2,9 @@ import queue
 import socket
 import threading
 from contextlib import contextmanager
-from typing import Callable, Iterator, Optional, Tuple
+from typing import Callable, Iterator, List, Optional, Tuple
 
-from .errors import MemcacheError
+from .errors import MemcacheError, PipelineError
 from .meta_command import MetaCommand, MetaResult
 
 
@@ -20,17 +20,26 @@ class Connection:
         *,
         username: Optional[str] = None,
         password: Optional[str] = None,
+        timeout: Optional[float] = None,
     ):
         self._addr = addr
         self._username = username
         self._password = password
-        self._connect()
+        self._connect(timeout)
 
-    def _connect(self) -> None:
+    def _connect(self, timeout: Optional[float]) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect(self._addr)
-        self.stream = self.socket.makefile(mode="rwb")
-        self._auth()
+        self.socket.settimeout(timeout)
+        try:
+            self.socket.connect(self._addr)
+            self.stream = self.socket.makefile(mode="rb")
+            self._auth()
+        except BaseException:
+            self.socket.close()
+            raise
+
+    def _set_timeout(self, timeout: Optional[float]) -> None:
+        self.socket.settimeout(timeout)
 
     def _auth(self) -> None:
         if self._username is None or self._password is None:
@@ -39,42 +48,46 @@ class Connection:
             self._username.encode("utf-8"),
             self._password.encode("utf-8"),
         )
-        self.stream.write(b"set auth x 0 %d\r\n" % len(auth_data))
-        self.stream.write(auth_data)
-        self.stream.write(b"\r\n")
-        self.stream.flush()
+        self.socket.sendall(
+            b"set auth x 0 %d\r\n" % len(auth_data) + auth_data + b"\r\n"
+        )
         response = self.stream.readline()
         if response != b"STORED\r\n":
             raise MemcacheError(response.rstrip(NEWLINE))
 
     def close(self) -> None:
-        self.stream.close()
-        self.socket.close()
+        try:
+            self.stream.close()
+        finally:
+            self.socket.close()
 
-    def flush_all(self, delay: int = 0) -> None:
+    def flush_all(self, delay: int = 0, timeout: Optional[float] = None) -> None:
+        self._set_timeout(timeout)
         if delay > 0:
-            self.stream.write(b"flush_all %d\r\n" % delay)
+            self.socket.sendall(b"flush_all %d\r\n" % delay)
         else:
-            self.stream.write(b"flush_all\r\n")
-        self.stream.flush()
+            self.socket.sendall(b"flush_all\r\n")
         response = self.stream.readline()
         if response != b"OK\r\n":
             raise MemcacheError(response.rstrip(NEWLINE))
 
-    def execute_meta_command(self, command: MetaCommand) -> MetaResult:
+    def execute_meta_command(
+        self, command: MetaCommand, timeout: Optional[float] = None
+    ) -> MetaResult:
         # Never reconnect and replay here. Once a write has started, a lost
         # response makes the outcome ambiguous (especially for ms/ma).
+        self._set_timeout(timeout)
         return self._execute_meta_command(command)
 
     def _execute_meta_command(self, command: MetaCommand) -> MetaResult:
-        self.stream.write(command.dump_header())
-        if command.value:
-            self.stream.write(command.value + b"\r\n")
-        self.stream.flush()
+        self.socket.sendall(command.dump())
         return self._receive_meta_result()
 
     def _receive_meta_result(self) -> MetaResult:
-        result = MetaResult.load_header(self.stream.readline())
+        line = self.stream.readline()
+        if not line:
+            raise MemcacheError("connection closed while reading response")
+        result = MetaResult.load_header(line)
 
         if result.rc == b"VA":
             if result.datalen is None:
@@ -83,6 +96,34 @@ class Connection:
             self.stream.read(2)  # read the "\r\n"
 
         return result
+
+    def execute_pipeline(
+        self, commands: List[MetaCommand], timeout: Optional[float] = None
+    ) -> List[MetaResult]:
+        """Write a quiet pipeline and read through its ``mn`` barrier."""
+        self._set_timeout(timeout)
+        written = 0
+        responses: List[MetaResult] = []
+        try:
+            for command in commands:
+                written += 1
+                self.socket.sendall(command.dump())
+            self.socket.sendall(b"mn\r\n")
+            while True:
+                line = self.stream.readline()
+                if not line:
+                    raise MemcacheError("connection closed while reading pipeline")
+                if line == b"MN\r\n":
+                    return responses
+                result = MetaResult.load_header(line)
+                if result.rc == b"VA":
+                    if result.datalen is None:
+                        raise MemcacheError("invalid response: missing datalen")
+                    result.value = self.stream.read(result.datalen)
+                    self.stream.read(2)
+                responses.append(result)
+        except BaseException as exc:
+            raise PipelineError(written, responses, exc)
 
 
 class Pool:
@@ -126,3 +167,12 @@ class Pool:
             raise
         else:
             self._connections.put(connection)
+
+    def close(self) -> None:
+        while True:
+            try:
+                connection = self._connections.get_nowait()
+            except queue.Empty:
+                break
+            connection.close()
+        self._size = 0

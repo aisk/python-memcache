@@ -1,8 +1,11 @@
+import threading
+
 import pytest
 
 from memcache import MetaCommand
 from memcache.experiment import (
     ABSENT,
+    AmbiguousWriteError,
     ArithmeticResult,
     Delete,
     Get,
@@ -17,6 +20,7 @@ from memcache.experiment import (
     Set,
     ValueState,
 )
+from memcache.errors import MemcacheError, PipelineError
 
 
 @pytest.fixture()
@@ -24,6 +28,71 @@ def client():
     with MetaClient(("localhost", 11211)) as value:
         value.flush_all()
         yield value
+
+
+def test_sync_client_has_no_background_event_loop_thread():
+    before = {thread.ident for thread in threading.enumerate()}
+    client = MetaClient(("localhost", 11211))
+    try:
+        assert {thread.ident for thread in threading.enumerate()} == before
+        assert not hasattr(client, "_loop")
+        assert not hasattr(client, "_thread")
+    finally:
+        client.close()
+
+
+def test_pipeline_error_is_a_memcache_error():
+    error = PipelineError(1, [], ConnectionResetError("lost"))
+    assert isinstance(error, MemcacheError)
+    assert error.written == 1
+    assert isinstance(error.cause, ConnectionResetError)
+
+
+def test_close_is_idempotent_and_rejects_new_work():
+    client = MetaClient(("localhost", 11211))
+    client.close()
+    client.close()
+    with pytest.raises(RuntimeError, match="client is closed"):
+        client.get("key")
+
+
+def test_batch_marks_written_side_effects_ambiguous(monkeypatch):
+    client = MetaClient(("localhost", 11211))
+
+    def fail(commands, timeout):
+        raise PipelineError(2, [], ConnectionResetError("lost"))
+
+    monkeypatch.setattr(client._servers[0], "pipeline", fail)
+    results = client.batch([Set("a", "v"), Get("b"), Set("c", "v")])
+    assert results[0].status is MutationStatus.AMBIGUOUS
+    assert results[1].status is GetStatus.FAILED
+    assert results[2].status is MutationStatus.FAILED
+
+    with pytest.raises(AmbiguousWriteError):
+        client.set("a", "v")
+    client.close()
+
+
+def test_server_failure_is_isolated_in_batch():
+    client = MetaClient([("localhost", 11211), ("localhost", 1)], timeout=0.2)
+    good = bad = None
+    for number in range(10000):
+        key = "sync-shard-%d" % number
+        port = client._server_for(key).addr[1]
+        if port == 11211 and good is None:
+            good = key
+        elif port == 1 and bad is None:
+            bad = key
+        if good is not None and bad is not None:
+            break
+    assert good is not None and bad is not None
+
+    results = client.batch([Set(good, "ok"), Set(bad, "no"), Get(good)])
+    assert results[0].status is MutationStatus.STORED
+    assert results[1].status is MutationStatus.FAILED
+    assert results[2].status is GetStatus.HIT
+    assert results[2].value == "ok"
+    client.close()
 
 
 def test_explicit_get_states_and_values(client):

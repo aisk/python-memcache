@@ -61,6 +61,15 @@ class AsyncMemcache:
             password=password,
         )
 
+    async def __aenter__(self) -> "AsyncMemcache":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        await self._meta.close()
+
     @asynccontextmanager
     async def _get_connection(
         self, key: Union[str, bytes]

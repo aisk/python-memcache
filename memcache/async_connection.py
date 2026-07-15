@@ -5,7 +5,7 @@ from typing import AsyncIterator, Callable, List, Optional, Tuple
 import anyio
 from anyio.streams.buffered import BufferedByteReceiveStream
 
-from .errors import MemcacheError
+from .errors import MemcacheError, PipelineError as PipelineError
 from .meta_command import MetaCommand, MetaResult
 
 
@@ -118,19 +118,6 @@ class AsyncConnection:
             await self.reader.receive_exactly(2)  # read the "\r\n"
 
         return result
-
-
-class PipelineError(Exception):
-    def __init__(
-        self,
-        written: int,
-        responses: List[MetaResult],
-        cause: BaseException,
-    ) -> None:
-        super().__init__(str(cause))
-        self.written = written
-        self.responses = responses
-        self.cause = cause
 
 
 class AsyncPool:
