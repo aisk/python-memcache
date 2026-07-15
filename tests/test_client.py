@@ -8,7 +8,15 @@ import memcache
 
 @pytest.fixture()
 def client():
-    return memcache.Memcache(("localhost", 11211))
+    with memcache.Memcache(("localhost", 11211)) as value:
+        yield value
+
+
+def test_context_manager_closes_client():
+    with memcache.Memcache(("localhost", 11211)) as client:
+        pass
+    with pytest.raises(RuntimeError, match="client is closed"):
+        client.get("key")
 
 
 def test_execute_command(client):

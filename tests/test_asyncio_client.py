@@ -2,13 +2,23 @@ import asyncio
 import time
 
 import pytest
+import pytest_asyncio
 
 import memcache
 
 
-@pytest.fixture()
-def client():
-    return memcache.AsyncMemcache(("localhost", 11211))
+@pytest_asyncio.fixture()
+async def client():
+    async with memcache.AsyncMemcache(("localhost", 11211)) as value:
+        yield value
+
+
+@pytest.mark.asyncio
+async def test_context_manager_closes_client():
+    async with memcache.AsyncMemcache(("localhost", 11211)) as client:
+        pass
+    with pytest.raises(RuntimeError, match="client is closed"):
+        await client.get("key")
 
 
 @pytest.mark.asyncio

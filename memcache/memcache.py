@@ -71,6 +71,17 @@ class Memcache:
             pools.append(Pool(make, max_size=pool_size, timeout=pool_timeout))
         self._compat_connections = hashring.HashRing(pools)
 
+    def __enter__(self) -> "Memcache":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._meta.close()
+        for pool in self._compat_connections.nodes:
+            pool.close()
+
     @contextmanager
     def _get_connection(self, key: Union[str, bytes]) -> Iterator[Connection]:
         routing_key = key if isinstance(key, str) else key.decode("latin-1")
