@@ -3,7 +3,19 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+)
 
 import hashring
 
@@ -25,6 +37,10 @@ from .result import (
     MutationStatus,
     Result,
 )
+
+
+ServerT = TypeVar("ServerT")
+GroupT = TypeVar("GroupT")
 
 
 class _Server:
@@ -253,7 +269,10 @@ class MetaClient(MetaProtocol):
         return fulfill
 
     @staticmethod
-    def _run_parallel(groups: Dict[Any, Any], function: Any) -> None:
+    def _run_parallel(
+        groups: Dict[ServerT, GroupT],
+        function: Callable[[ServerT, GroupT], None],
+    ) -> None:
         items = list(groups.items())
         if len(items) <= 1:
             for server, group in items:
