@@ -87,7 +87,18 @@ with MetaClient(("localhost", 11211)) as client:
         lease.fulfill(build_report(), ttl=300)
 ```
 
-`AsyncMetaClient` has the same concepts and call shape; its methods and lease `fulfill()` are awaited. Protocol experts can use `client.raw.execute(...)` as a framing-safe escape hatch.
+`AsyncMetaClient` has the same concepts and call shape; its methods and lease `fulfill()` are awaited.
+
+For protocol experts, `client.meta` maps the wire commands one-to-one (`get`/`set`/`delete`/`arithmetic`/`debug`, i.e. `mg`/`ms`/`md`/`ma`/`me`) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping:
+
+```python
+    stored = client.meta.set("key", b"payload", ttl=60, return_cas=True, opaque=b"req1")
+    got = client.meta.get("key", return_cas=True, return_ttl=True)
+    assert got.rc == b"VA" and got.cas == stored.cas
+
+    # Framing-safe bytes-level escape hatch for anything not covered above.
+    client.meta.execute(command="mg", key="key", flags=[b"v", b"t"])
+```
 
 ## About the Project
 

@@ -23,7 +23,20 @@ from ..connection import Addr, Connection, Pool
 from ..errors import AmbiguousWriteError, PipelineError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
 from ..serialize import DumpFunc, LoadFunc, dump, load
-from ._meta_core import MetaProtocol, Prepared, key_bytes, positive
+from ._meta_core import MetaProtocol, Prepared
+from .meta_api import (
+    MetaCommandResult,
+    Token,
+    build_arithmetic,
+    build_debug,
+    build_delete,
+    build_get,
+    build_set,
+    key_bytes,
+    parse_debug_result,
+    parse_meta_result,
+    positive,
+)
 from .operation import ABSENT, PRESENT, Delete, Get, IfCas, Increment, Operation, Set
 from .result import (
     ArithmeticResult,
@@ -126,9 +139,167 @@ class _Server:
                 connection.close()
 
 
-class RawClient:
+class MetaNamespace:
+    """Typed, flag-for-flag surface over the meta protocol commands.
+
+    Methods map 1:1 to the wire commands (``mg``/``ms``/``md``/``ma``/``me``)
+    with one keyword argument per protocol flag. Values are raw bytes and
+    responses are lightly parsed :class:`MetaCommandResult` objects; no
+    serialization or semantic interpretation happens here. The bytes-level
+    ``execute``/``batch`` escape hatch remains for anything the typed
+    surface does not cover.
+    """
+
     def __init__(self, client: "MetaClient") -> None:
         self._client = client
+
+    def _run(self, command: MetaCommand, timeout: Optional[float]) -> MetaCommandResult:
+        return parse_meta_result(
+            self._client.execute_meta_command(command, timeout=timeout)
+        )
+
+    def get(
+        self,
+        key: Key,
+        *,
+        value: bool = True,
+        return_cas: bool = False,
+        return_ttl: bool = False,
+        return_size: bool = False,
+        return_last_access: bool = False,
+        return_hit_before: bool = False,
+        return_client_flags: bool = False,
+        return_key: bool = False,
+        touch: Optional[int] = None,
+        vivify_ttl: Optional[int] = None,
+        recache_ttl: Optional[int] = None,
+        unless_cas: Optional[int] = None,
+        new_cas: Optional[int] = None,
+        no_lru_bump: bool = False,
+        opaque: Optional[Token] = None,
+        timeout: Optional[float] = None,
+    ) -> MetaCommandResult:
+        command = build_get(
+            key,
+            value=value,
+            return_cas=return_cas,
+            return_ttl=return_ttl,
+            return_size=return_size,
+            return_last_access=return_last_access,
+            return_hit_before=return_hit_before,
+            return_client_flags=return_client_flags,
+            return_key=return_key,
+            touch=touch,
+            vivify_ttl=vivify_ttl,
+            recache_ttl=recache_ttl,
+            unless_cas=unless_cas,
+            new_cas=new_cas,
+            no_lru_bump=no_lru_bump,
+            opaque=opaque,
+        )
+        return self._run(command, timeout)
+
+    def set(
+        self,
+        key: Key,
+        value: bytes,
+        *,
+        client_flags: Optional[int] = None,
+        ttl: Optional[int] = None,
+        mode: str = "set",
+        compare_cas: Optional[int] = None,
+        new_cas: Optional[int] = None,
+        invalidate: bool = False,
+        vivify_ttl: Optional[int] = None,
+        return_cas: bool = False,
+        return_size: bool = False,
+        return_key: bool = False,
+        opaque: Optional[Token] = None,
+        timeout: Optional[float] = None,
+    ) -> MetaCommandResult:
+        command = build_set(
+            key,
+            value,
+            client_flags=client_flags,
+            ttl=ttl,
+            mode=mode,
+            compare_cas=compare_cas,
+            new_cas=new_cas,
+            invalidate=invalidate,
+            vivify_ttl=vivify_ttl,
+            return_cas=return_cas,
+            return_size=return_size,
+            return_key=return_key,
+            opaque=opaque,
+        )
+        return self._run(command, timeout)
+
+    def delete(
+        self,
+        key: Key,
+        *,
+        compare_cas: Optional[int] = None,
+        new_cas: Optional[int] = None,
+        invalidate: bool = False,
+        ttl: Optional[int] = None,
+        drop_value: bool = False,
+        return_key: bool = False,
+        opaque: Optional[Token] = None,
+        timeout: Optional[float] = None,
+    ) -> MetaCommandResult:
+        command = build_delete(
+            key,
+            compare_cas=compare_cas,
+            new_cas=new_cas,
+            invalidate=invalidate,
+            ttl=ttl,
+            drop_value=drop_value,
+            return_key=return_key,
+            opaque=opaque,
+        )
+        return self._run(command, timeout)
+
+    def arithmetic(
+        self,
+        key: Key,
+        *,
+        delta: Optional[int] = None,
+        decrement: bool = False,
+        initial: Optional[int] = None,
+        initial_ttl: Optional[int] = None,
+        ttl: Optional[int] = None,
+        compare_cas: Optional[int] = None,
+        new_cas: Optional[int] = None,
+        return_value: bool = True,
+        return_ttl: bool = False,
+        return_cas: bool = False,
+        return_key: bool = False,
+        opaque: Optional[Token] = None,
+        timeout: Optional[float] = None,
+    ) -> MetaCommandResult:
+        command = build_arithmetic(
+            key,
+            delta=delta,
+            decrement=decrement,
+            initial=initial,
+            initial_ttl=initial_ttl,
+            ttl=ttl,
+            compare_cas=compare_cas,
+            new_cas=new_cas,
+            return_value=return_value,
+            return_ttl=return_ttl,
+            return_cas=return_cas,
+            return_key=return_key,
+            opaque=opaque,
+        )
+        return self._run(command, timeout)
+
+    def debug(
+        self, key: Key, *, timeout: Optional[float] = None
+    ) -> Optional[Dict[str, str]]:
+        return parse_debug_result(
+            self._client.execute_meta_command(build_debug(key), timeout=timeout)
+        )
 
     def execute(
         self,
@@ -161,7 +332,7 @@ class RawClient:
         grouped: Dict[_Server, List[Tuple[int, MetaCommand]]] = {}
         for index, command in enumerate(commands):
             if b"q" in command.flags:
-                raise ValueError("raw batch does not accept quiet commands")
+                raise ValueError("meta batch does not accept quiet commands")
             server = self._client._server_for(command.key)
             grouped.setdefault(server, []).append((index, command))
         output: List[Optional[MetaResult]] = [None] * len(commands)
@@ -172,13 +343,13 @@ class RawClient:
                 self._client._timeout(timeout),
             )
             if len(responses) != len(group):
-                raise ProtocolError("raw batch received an unexpected response count")
+                raise ProtocolError("meta batch received an unexpected response count")
             for (index, _), response in zip(group, responses):
                 output[index] = response
 
         self._client._run_parallel(grouped, run_group)
         if any(result is None for result in output):
-            raise ProtocolError("raw batch left an operation unresolved")
+            raise ProtocolError("meta batch left an operation unresolved")
         return cast(List[MetaResult], output)
 
 
@@ -221,7 +392,7 @@ class MetaClient(MetaProtocol):
 
             compat_pools.append(Pool(make, max_size=pool_size, timeout=pool_timeout))
         self._compat_ring = hashring.HashRing(compat_pools)
-        self.raw = RawClient(self)
+        self.meta = MetaNamespace(self)
         self._closed = False
 
     def __enter__(self) -> "MetaClient":

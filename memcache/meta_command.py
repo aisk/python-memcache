@@ -103,7 +103,9 @@ class MetaResult:
         flags = []
         datalen = None
         if len(parts) > 1:
-            if chr(parts[1][0]).isdigit():
+            # Only VA carries a datalen token; ME responses echo the key,
+            # which may itself start with a digit.
+            if rc == b"VA" and chr(parts[1][0]).isdigit():
                 datalen = int(parts[1])
                 flags = parts[2:]
             else:

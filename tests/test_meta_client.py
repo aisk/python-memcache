@@ -5,6 +5,7 @@ import pytest
 from memcache import MetaCommand
 from memcache.experiment import (
     ABSENT,
+    PRESENT,
     AmbiguousWriteError,
     ArithmeticResult,
     Delete,
@@ -254,20 +255,146 @@ def test_byte_concatenation_arithmetic_touch_and_delete(client):
     assert client.delete("n").status is MutationStatus.NOT_FOUND
 
 
-def test_binary_key_and_raw_escape_hatch(client):
+def test_binary_key_and_bytes_escape_hatch(client):
     key = b"binary key\x00"
     client.set(key, "value")
     assert client.get(key).key == key
     assert client.get(key).value == "value"
 
-    raw = client.raw.execute(command="mg", key=key, flags=[b"v"])
+    raw = client.meta.execute(command="mg", key=key, flags=[b"v"])
     assert raw.rc == b"VA"
     assert raw.value == b"value"
 
-    raw_batch = client.raw.batch(
+    raw_batch = client.meta.batch(
         [MetaCommand(b"mg", key, flags=[b"v"]), MetaCommand(b"mg", b"none")]
     )
     assert [item.rc for item in raw_batch] == [b"VA", b"EN"]
+
+
+def test_meta_namespace_get_set_flags(client):
+    stored = client.meta.set(
+        "wire",
+        b"payload",
+        ttl=60,
+        client_flags=7,
+        return_cas=True,
+        return_size=True,
+        return_key=True,
+        opaque=b"tok1",
+    )
+    assert stored.rc == b"HD" and stored.ok and bool(stored)
+    assert stored.cas is not None
+    assert stored.size == len(b"payload")
+    assert stored.key == b"wire"
+    assert stored.opaque == b"tok1"
+
+    got = client.meta.get(
+        "wire",
+        return_cas=True,
+        return_ttl=True,
+        return_size=True,
+        return_client_flags=True,
+        return_key=True,
+        opaque=17,
+    )
+    assert got.rc == b"VA"
+    assert got.value == b"payload"
+    assert got.client_flags == 7
+    assert got.cas == stored.cas
+    assert got.ttl is not None and 0 < got.ttl <= 60
+    assert got.key == b"wire"
+    assert got.opaque == b"17"
+
+    unchanged = client.meta.get("wire", unless_cas=stored.cas)
+    assert unchanged.rc == b"HD" and unchanged.value is None
+
+    header_only = client.meta.get("wire", value=False, return_size=True)
+    assert header_only.rc == b"HD"
+    assert header_only.size == len(b"payload")
+
+    miss = client.meta.get("absent")
+    assert miss.rc == b"EN" and not miss.ok and not miss
+
+    binary = b"binary key\x00"
+    client.meta.set(binary, b"x")
+    assert client.meta.get(binary, return_key=True).key == binary
+
+
+def test_meta_namespace_store_modes_and_cas(client):
+    assert client.meta.set("m", b"1", mode="add").rc == b"HD"
+    assert client.meta.set("m", b"0", mode="add").rc == b"NS"
+    assert client.meta.set("m", b"23", mode="append").rc == b"HD"
+    assert client.meta.set("m", b"0", mode="prepend").rc == b"HD"
+    assert client.meta.get("m").value == b"0123"
+    assert client.meta.set("missing", b"x", mode="replace").rc == b"NS"
+
+    cas = client.meta.get("m", value=False, return_cas=True).cas
+    assert client.meta.set("m", b"x", compare_cas=cas + 1).rc == b"EX"
+    assert client.meta.set("m", b"x", compare_cas=cas, new_cas=99).rc == b"HD"
+    assert client.meta.get("m", value=False, return_cas=True).cas == 99
+
+    with pytest.raises(ValueError):
+        client.meta.set("m", b"x", mode="upsert")
+    with pytest.raises(TypeError):
+        client.meta.set("m", "not bytes")
+    with pytest.raises(ValueError):
+        client.meta.set("m", b"x", vivify_ttl=60)
+
+
+def test_meta_namespace_delete_invalidate_and_tombstone(client):
+    client.meta.set("gone", b"x")
+    assert client.meta.delete("gone").rc == b"HD"
+    assert client.meta.delete("gone").rc == b"NF"
+
+    client.meta.set("stale", b"old", ttl=60)
+    assert client.meta.delete("stale", invalidate=True, ttl=30).rc == b"HD"
+    revalidate = client.meta.get("stale")
+    assert revalidate.value == b"old"
+    assert revalidate.stale and revalidate.won
+
+    client.meta.set("husk", b"body")
+    assert client.meta.delete("husk", drop_value=True).rc == b"HD"
+    emptied = client.meta.get("husk", return_size=True)
+    assert emptied.rc == b"VA"
+    assert emptied.value == b"" and emptied.size == 0
+
+    with pytest.raises(ValueError):
+        client.meta.delete("stale", ttl=30)
+
+
+def test_meta_namespace_arithmetic_and_debug(client):
+    created = client.meta.arithmetic("counter", initial=5, initial_ttl=60)
+    assert created.rc == b"VA" and created.value == b"5"
+    assert client.meta.arithmetic("counter", delta=3).value == b"8"
+    grown = client.meta.arithmetic(
+        "counter", delta=20, decrement=True, return_ttl=True, return_cas=True
+    )
+    assert grown.value == b"0"
+    assert grown.ttl is not None and grown.cas is not None
+    assert client.meta.arithmetic("missing").rc == b"NF"
+    with pytest.raises(ValueError):
+        client.meta.arithmetic("counter", initial=1)
+
+    info = client.meta.debug("counter")
+    assert info is not None
+    assert "size" in info and "cas" in info
+    assert client.meta.debug("missing") is None
+    # A digit-leading key must not be confused with a VA datalen token.
+    client.meta.set("123digits", b"x")
+    assert client.meta.debug("123digits") is not None
+    # memcached ignores the b flag on me, which would turn a binary-key
+    # debug into a silent miss; the client must refuse loudly instead.
+    with pytest.raises(ValueError):
+        client.meta.debug(b"binary key\x00")
+
+
+def test_meta_namespace_opaque_validation(client):
+    with pytest.raises(ValueError):
+        client.meta.get("k", opaque=b"has space")
+    with pytest.raises(ValueError):
+        client.meta.get("k", opaque=b"x" * 33)
+    with pytest.raises(TypeError):
+        client.meta.get("k", opaque=1.5)
 
 
 def test_programming_errors_are_raised_before_batch(client):
@@ -279,3 +406,9 @@ def test_programming_errors_are_raised_before_batch(client):
         client.batch([Delete("a", stale_for=10)])
     with pytest.raises(TypeError):
         client.set("a", "v", condition=object())
+    # ABSENT/PRESENT map to a store mode; combining them with append/prepend
+    # would emit two conflicting M flags on the wire.
+    with pytest.raises(ValueError):
+        client.batch([Set("a", b"v", condition=ABSENT, mode="append")])
+    with pytest.raises(ValueError):
+        client.batch([Set("a", b"v", condition=PRESENT, mode="prepend")])

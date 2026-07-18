@@ -1,6 +1,7 @@
 import pytest
 import pytest_asyncio
 
+from memcache import MetaCommand
 from memcache.async_connection import PipelineError
 from memcache.experiment import (
     AmbiguousWriteError,
@@ -60,6 +61,30 @@ async def test_async_lease_cursor(client):
     fulfilled = await winner.fulfill("ready", ttl=60)
     assert fulfilled.status is MutationStatus.STORED
     assert (await client.get("lease")).value == "ready"
+
+
+@pytest.mark.asyncio
+async def test_async_meta_namespace_has_the_same_shape(client):
+    stored = await client.meta.set("wire", b"payload", ttl=60, return_cas=True)
+    assert stored.ok and stored.cas is not None
+
+    got = await client.meta.get("wire", return_cas=True, return_ttl=True)
+    assert got.rc == b"VA" and got.value == b"payload"
+    assert got.cas == stored.cas
+
+    count = await client.meta.arithmetic("hits", initial=1, initial_ttl=60)
+    assert count.value == b"1"
+    assert await client.meta.debug("wire") is not None
+
+    assert (await client.meta.delete("wire")).rc == b"HD"
+    assert (await client.meta.get("wire")).rc == b"EN"
+
+    raw = await client.meta.execute(command="mg", key="hits", flags=[b"v"])
+    assert raw.rc == b"VA" and raw.value == b"1"
+    batch = await client.meta.batch(
+        [MetaCommand(b"mg", b"hits", flags=[b"v"]), MetaCommand(b"mg", b"none")]
+    )
+    assert [item.rc for item in batch] == [b"VA", b"EN"]
 
 
 @pytest.mark.asyncio

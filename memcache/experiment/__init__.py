@@ -1,5 +1,6 @@
 from ..errors import AmbiguousWriteError, ProtocolError
 from .async_meta_client import AsyncMetaClient
+from .meta_api import MetaCommandResult
 from .meta_client import MetaClient
 from .operation import ABSENT, PRESENT, Delete, Get, IfCas, Increment, Set
 from .result import (
@@ -35,6 +36,7 @@ __all__ = [
     "LeaseState",
     "Meta",
     "MetaClient",
+    "MetaCommandResult",
     "MutationResult",
     "MutationStatus",
     "ProtocolError",

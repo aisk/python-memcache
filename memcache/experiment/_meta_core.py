@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ..errors import MemcacheError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
 from ..serialize import DumpFunc, LoadFunc
+from .meta_api import (
+    MetaCommandResult,
+    build_arithmetic,
+    build_delete,
+    build_get,
+    build_set,
+    key_bytes,
+    parse_meta_result,
+    positive,
+    response_flags,
+)
 from .operation import ABSENT, PRESENT, Delete, Get, IfCas, Increment, Operation, Set
 from .result import (
     ArithmeticResult,
@@ -21,51 +32,6 @@ from .result import (
     Result,
     ValueState,
 )
-
-
-def key_bytes(key: Key) -> bytes:
-    if isinstance(key, str):
-        return key.encode("utf-8")
-    if isinstance(key, bytes):
-        return key
-    raise TypeError("key must be str or bytes")
-
-
-def positive(name: str, value: Optional[int], *, allow_zero: bool = True) -> None:
-    if value is None:
-        return
-    minimum = 0 if allow_zero else 1
-    if not isinstance(value, int) or value < minimum:
-        raise ValueError("%s must be an integer >= %d" % (name, minimum))
-
-
-def response_flags(flags: Iterable[bytes]) -> Dict[str, Any]:
-    parsed: Dict[str, Any] = {}
-    for flag in flags:
-        if not flag:
-            continue
-        code = chr(flag[0])
-        token = flag[1:]
-        if code in ("f", "c", "t", "l", "s"):
-            names = {
-                "f": "client_flags",
-                "c": "cas",
-                "t": "ttl",
-                "l": "last_access",
-                "s": "size",
-            }
-            parsed[names[code]] = int(token)
-        elif code == "h":
-            parsed["hit_before"] = token != b"0"
-        elif code == "O":
-            parsed["opaque"] = token
-        elif code == "W":
-            parsed["won"] = True
-        elif code == "Z":
-            parsed["busy"] = True
-        elif code == "X":
-            parsed["stale"] = True
-    return parsed
 
 
 @dataclass
@@ -99,40 +65,30 @@ class MetaProtocol:
         raise TypeError("unsupported batch operation")
 
     def _prepare_get(self, index: int, operation: Get, key: bytes) -> Prepared:
-        positive("touch", operation.touch)
         positive("lease_ttl", operation.lease_ttl, allow_zero=False)
         positive("refresh_before", operation.refresh_before, allow_zero=False)
         if operation.refresh_before is not None and operation.lease_ttl is None:
             raise ValueError("refresh_before requires lease_ttl")
         if operation.unless_cas is not None and not operation.value:
             raise ValueError("unless_cas requires a value read")
-        positive("unless_cas", operation.unless_cas)
-        flags = [b"f"]
-        if operation.value:
-            flags.append(b"v")
         requested_meta = operation.meta
         if operation.lease_ttl is not None or operation.unless_cas is not None:
             requested_meta |= Meta.CAS
-        mapping = (
-            (Meta.CAS, b"c"),
-            (Meta.TTL, b"t"),
-            (Meta.SIZE, b"s"),
-            (Meta.LAST_ACCESS, b"l"),
-            (Meta.HIT_BEFORE, b"h"),
+        command = build_get(
+            operation.key,
+            value=operation.value,
+            return_client_flags=True,
+            return_cas=bool(requested_meta & Meta.CAS),
+            return_ttl=bool(requested_meta & Meta.TTL),
+            return_size=bool(requested_meta & Meta.SIZE),
+            return_last_access=bool(requested_meta & Meta.LAST_ACCESS),
+            return_hit_before=bool(requested_meta & Meta.HIT_BEFORE),
+            touch=operation.touch,
+            vivify_ttl=operation.lease_ttl,
+            recache_ttl=operation.refresh_before,
+            unless_cas=operation.unless_cas,
+            no_lru_bump=operation.no_lru_bump,
         )
-        flags.extend(wire for bit, wire in mapping if requested_meta & bit)
-        optional_flags = (
-            (operation.touch, b"T"),
-            (operation.unless_cas, b"C"),
-            (operation.lease_ttl, b"N"),
-            (operation.refresh_before, b"R"),
-        )
-        for value, prefix in optional_flags:
-            if value is not None:
-                flags.append(prefix + str(value).encode("ascii"))
-        if operation.no_lru_bump:
-            flags.append(b"u")
-        command = MetaCommand(b"mg", key, flags=flags)
         side_effect = any(
             value is not None
             for value in (
@@ -144,87 +100,82 @@ class MetaProtocol:
         return Prepared(index, operation, command, side_effect)
 
     def _prepare_set(self, index: int, operation: Set, key: bytes) -> Prepared:
-        positive("ttl", operation.ttl)
         positive("version", operation.version)
+        positive("vivify_ttl", operation.vivify_ttl, allow_zero=False)
+        mode, compare_cas = self._store_mode(operation)
         raw, client_flags = self._dump(key, operation.value)
-        flags = [b"F%d" % client_flags]
-        if operation.ttl is not None:
-            flags.append(b"T%d" % operation.ttl)
-        if operation.version is not None:
-            flags.append(b"E%d" % operation.version)
-        if operation.return_cas:
-            flags.append(b"c")
-        flags.extend(self._condition_flags(operation))
-        flags.extend(self._store_mode_flags(operation))
-        if operation.vivify_ttl is not None:
-            if operation.mode not in ("append", "prepend"):
-                raise ValueError("vivify_ttl is only valid for byte concatenation")
-            positive("vivify_ttl", operation.vivify_ttl, allow_zero=False)
-            flags.append(b"N%d" % operation.vivify_ttl)
-        command = MetaCommand(b"ms", key, len(raw), flags, raw)
+        command = build_set(
+            operation.key,
+            raw,
+            client_flags=client_flags,
+            ttl=operation.ttl,
+            mode=mode,
+            compare_cas=compare_cas,
+            new_cas=operation.version,
+            vivify_ttl=operation.vivify_ttl,
+            return_cas=operation.return_cas,
+        )
         return Prepared(index, operation, command, True)
 
     @staticmethod
-    def _condition_flags(operation: Set) -> List[bytes]:
-        condition = operation.condition
-        if condition is ABSENT:
-            return [b"ME"]
-        if condition is PRESENT:
-            return [b"MR"]
-        if isinstance(condition, IfCas):
-            return [b"C%d" % condition.token]
-        if condition is not None:
-            raise TypeError("invalid store condition")
-        return []
-
-    @staticmethod
-    def _store_mode_flags(operation: Set) -> List[bytes]:
-        modes = {"set": None, "append": b"MA", "prepend": b"MP"}
-        if operation.mode not in modes:
+    def _store_mode(operation: Set) -> Tuple[str, Optional[int]]:
+        """Translate the semantic condition/mode pair to a wire store mode."""
+        if operation.mode not in ("set", "append", "prepend"):
             raise ValueError("invalid store mode")
-        mode_flag = modes[operation.mode]
-        return [mode_flag] if mode_flag is not None else []
+        condition = operation.condition
+        if condition is None:
+            return operation.mode, None
+        if isinstance(condition, IfCas):
+            return operation.mode, condition.token
+        if condition is ABSENT:
+            mode = "add"
+        elif condition is PRESENT:
+            mode = "replace"
+        else:
+            raise TypeError("invalid store condition")
+        if operation.mode != "set":
+            raise ValueError(
+                "a presence condition cannot be combined with %s mode" % operation.mode
+            )
+        return mode, None
 
     def _prepare_delete(self, index: int, operation: Delete, key: bytes) -> Prepared:
         positive("stale_for", operation.stale_for)
         if operation.stale_for is not None and not operation.invalidate:
             raise ValueError("stale_for is only valid for invalidate")
-        flags = []
-        if operation.condition is not None:
-            flags.append(b"C%d" % operation.condition.token)
-        if operation.invalidate:
-            flags.append(b"I")
-            if operation.stale_for is not None:
-                flags.append(b"T%d" % operation.stale_for)
-        return Prepared(index, operation, MetaCommand(b"md", key, flags=flags), True)
+        command = build_delete(
+            operation.key,
+            compare_cas=(
+                operation.condition.token if operation.condition is not None else None
+            ),
+            invalidate=operation.invalidate,
+            ttl=operation.stale_for,
+        )
+        return Prepared(index, operation, command, True)
 
     def _prepare_increment(
         self, index: int, operation: Increment, key: bytes
     ) -> Prepared:
-        positive("delta", operation.delta)
-        positive("initial", operation.initial)
         positive("initial_ttl", operation.initial_ttl, allow_zero=False)
-        positive("ttl", operation.ttl)
         positive("version", operation.version)
         if operation.initial is not None and operation.initial_ttl is None:
             raise ValueError("initial requires initial_ttl")
         if operation.initial_ttl is not None and operation.initial is None:
             raise ValueError("initial_ttl requires initial")
-        flags = [b"D%d" % operation.delta, b"v"]
-        if operation.decrement:
-            flags.append(b"MD")
-        if operation.initial is not None:
-            assert operation.initial_ttl is not None
-            flags.extend([b"J%d" % operation.initial, b"N%d" % operation.initial_ttl])
-        if operation.ttl is not None:
-            flags.append(b"T%d" % operation.ttl)
-        if operation.condition is not None:
-            flags.append(b"C%d" % operation.condition.token)
-        if operation.version is not None:
-            flags.append(b"E%d" % operation.version)
-        if operation.return_cas:
-            flags.append(b"c")
-        return Prepared(index, operation, MetaCommand(b"ma", key, flags=flags), True)
+        command = build_arithmetic(
+            operation.key,
+            delta=operation.delta,
+            decrement=operation.decrement,
+            initial=operation.initial,
+            initial_ttl=operation.initial_ttl,
+            ttl=operation.ttl,
+            compare_cas=(
+                operation.condition.token if operation.condition is not None else None
+            ),
+            new_cas=operation.version,
+            return_cas=operation.return_cas,
+        )
+        return Prepared(index, operation, command, True)
 
     def _failure(
         self, prepared: Prepared, ambiguous: bool, error: BaseException
@@ -252,56 +203,51 @@ class MetaProtocol:
                     error=ProtocolError("arithmetic response was suppressed"),
                 )
             return MutationResult(operation.key, MutationStatus.STORED)
-        parsed = response_flags(response.flags)
+        wire = parse_meta_result(response)
         if isinstance(operation, Get):
-            return self._parse_get(operation, response, parsed)
+            return self._parse_get(operation, wire)
         if isinstance(operation, Increment):
-            arithmetic_status = self._mutation_status(operation, response.rc)
-            value = (
-                int(response.value) if response.rc == b"VA" and response.value else None
-            )
+            arithmetic_status = self._mutation_status(operation, wire.rc)
+            value = int(wire.value) if wire.rc == b"VA" and wire.value else None
             return ArithmeticResult(
                 operation.key,
                 arithmetic_status,
                 value=value,
-                item=ItemMeta(cas=parsed.get("cas"), ttl=parsed.get("ttl")),
+                item=ItemMeta(cas=wire.cas, ttl=wire.ttl),
             )
         return MutationResult(
             operation.key,
-            self._mutation_status(operation, response.rc),
-            cas=parsed.get("cas"),
+            self._mutation_status(operation, wire.rc),
+            cas=wire.cas,
         )
 
-    def _parse_get(
-        self, operation: Get, response: MetaResult, parsed: Dict[str, Any]
-    ) -> GetResult[Any]:
-        if response.rc == b"EN":
+    def _parse_get(self, operation: Get, wire: MetaCommandResult) -> GetResult[Any]:
+        if wire.rc == b"EN":
             return GetResult(key=operation.key, status=GetStatus.MISS)
-        if response.rc not in (b"VA", b"HD"):
+        if wire.rc not in (b"VA", b"HD"):
             return GetResult(
                 key=operation.key,
                 status=GetStatus.FAILED,
-                error=ProtocolError("unexpected get response %r" % response.rc),
+                error=ProtocolError("unexpected get response %r" % wire.rc),
             )
         item = ItemMeta(
-            cas=parsed.get("cas"),
-            ttl=parsed.get("ttl"),
-            size=parsed.get("size"),
-            last_access=parsed.get("last_access"),
-            hit_before=parsed.get("hit_before"),
+            cas=wire.cas,
+            ttl=wire.ttl,
+            size=wire.size,
+            last_access=wire.last_access,
+            hit_before=wire.hit_before,
         )
         lease_state = (
             LeaseState.GRANTED
-            if parsed.get("won")
-            else LeaseState.BUSY if parsed.get("busy") else LeaseState.NONE
+            if wire.won
+            else LeaseState.BUSY if wire.busy else LeaseState.NONE
         )
-        stale = bool(parsed.get("stale"))
         placeholder = (
-            not stale and response.datalen == 0 and lease_state is not LeaseState.NONE
+            not wire.stale and wire.value == b"" and lease_state is not LeaseState.NONE
         )
         value_state = (
             ValueState.STALE
-            if stale
+            if wire.stale
             else ValueState.MISSING if placeholder else ValueState.FRESH
         )
         has_value = False
@@ -310,16 +256,16 @@ class MetaProtocol:
             status = (
                 GetStatus.MISS if operation.lease_ttl is not None else GetStatus.PENDING
             )
-        elif response.rc == b"HD" and operation.unless_cas is not None:
+        elif wire.rc == b"HD" and operation.unless_cas is not None:
             status = GetStatus.UNCHANGED
         else:
             status = GetStatus.HIT
-            has_value = response.rc == b"VA" and response.value is not None
+            has_value = wire.rc == b"VA" and wire.value is not None
             if has_value:
                 value = self._load(
                     key_bytes(operation.key),
-                    response.value or b"",
-                    parsed.get("client_flags", 0),
+                    wire.value or b"",
+                    wire.client_flags or 0,
                 )
         kwargs: Dict[str, Any] = dict(
             key=operation.key,
