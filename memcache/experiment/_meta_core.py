@@ -17,7 +17,7 @@ from .meta_api import (
     positive,
     response_flags,
 )
-from .operation import ABSENT, PRESENT, Delete, Get, IfCas, Increment, Operation, Set
+from .operation import Arithmetic, Delete, Get, Operation, Set
 from .result import (
     ArithmeticResult,
     GetResult,
@@ -60,8 +60,8 @@ class MetaProtocol:
             return self._prepare_set(index, operation, key)
         if isinstance(operation, Delete):
             return self._prepare_delete(index, operation, key)
-        if isinstance(operation, Increment):
-            return self._prepare_increment(index, operation, key)
+        if isinstance(operation, Arithmetic):
+            return self._prepare_arithmetic(index, operation, key)
         raise TypeError("unsupported batch operation")
 
     def _prepare_get(self, index: int, operation: Get, key: bytes) -> Prepared:
@@ -102,42 +102,27 @@ class MetaProtocol:
     def _prepare_set(self, index: int, operation: Set, key: bytes) -> Prepared:
         positive("version", operation.version)
         positive("vivify_ttl", operation.vivify_ttl, allow_zero=False)
-        mode, compare_cas = self._store_mode(operation)
-        raw, client_flags = self._dump(key, operation.value)
+        client_flags: Optional[int]
+        if operation.mode in ("append", "prepend"):
+            # The server concatenates raw bytes; a serialized payload would
+            # corrupt the stored value, so concatenation takes bytes only.
+            if not isinstance(operation.value, bytes):
+                raise TypeError("%s requires a bytes value" % operation.mode)
+            raw, client_flags = operation.value, None
+        else:
+            raw, client_flags = self._dump(key, operation.value)
         command = build_set(
             operation.key,
             raw,
             client_flags=client_flags,
             ttl=operation.ttl,
-            mode=mode,
-            compare_cas=compare_cas,
+            mode=operation.mode,
+            compare_cas=operation.compare_cas,
             new_cas=operation.version,
             vivify_ttl=operation.vivify_ttl,
             return_cas=operation.return_cas,
         )
         return Prepared(index, operation, command, True)
-
-    @staticmethod
-    def _store_mode(operation: Set) -> Tuple[str, Optional[int]]:
-        """Translate the semantic condition/mode pair to a wire store mode."""
-        if operation.mode not in ("set", "append", "prepend"):
-            raise ValueError("invalid store mode")
-        condition = operation.condition
-        if condition is None:
-            return operation.mode, None
-        if isinstance(condition, IfCas):
-            return operation.mode, condition.token
-        if condition is ABSENT:
-            mode = "add"
-        elif condition is PRESENT:
-            mode = "replace"
-        else:
-            raise TypeError("invalid store condition")
-        if operation.mode != "set":
-            raise ValueError(
-                "a presence condition cannot be combined with %s mode" % operation.mode
-            )
-        return mode, None
 
     def _prepare_delete(self, index: int, operation: Delete, key: bytes) -> Prepared:
         positive("stale_for", operation.stale_for)
@@ -145,16 +130,14 @@ class MetaProtocol:
             raise ValueError("stale_for is only valid for invalidate")
         command = build_delete(
             operation.key,
-            compare_cas=(
-                operation.condition.token if operation.condition is not None else None
-            ),
+            compare_cas=operation.compare_cas,
             invalidate=operation.invalidate,
             ttl=operation.stale_for,
         )
         return Prepared(index, operation, command, True)
 
-    def _prepare_increment(
-        self, index: int, operation: Increment, key: bytes
+    def _prepare_arithmetic(
+        self, index: int, operation: Arithmetic, key: bytes
     ) -> Prepared:
         positive("initial_ttl", operation.initial_ttl, allow_zero=False)
         positive("version", operation.version)
@@ -169,10 +152,9 @@ class MetaProtocol:
             initial=operation.initial,
             initial_ttl=operation.initial_ttl,
             ttl=operation.ttl,
-            compare_cas=(
-                operation.condition.token if operation.condition is not None else None
-            ),
+            compare_cas=operation.compare_cas,
             new_cas=operation.version,
+            return_ttl=operation.return_ttl,
             return_cas=operation.return_cas,
         )
         return Prepared(index, operation, command, True)
@@ -187,7 +169,7 @@ class MetaProtocol:
         if isinstance(operation, Get):
             status = GetStatus.AMBIGUOUS if ambiguous else GetStatus.FAILED
             return GetResult(key=operation.key, status=status, error=error)
-        if isinstance(operation, Increment):
+        if isinstance(operation, Arithmetic):
             return ArithmeticResult(operation.key, mutation_status, error=error)
         return MutationResult(operation.key, mutation_status, error=error)
 
@@ -196,7 +178,7 @@ class MetaProtocol:
         if response is None:
             if isinstance(operation, Get):
                 return GetResult(key=operation.key, status=GetStatus.MISS)
-            if isinstance(operation, Increment):
+            if isinstance(operation, Arithmetic):
                 return ArithmeticResult(
                     operation.key,
                     MutationStatus.FAILED,
@@ -206,7 +188,7 @@ class MetaProtocol:
         wire = parse_meta_result(response)
         if isinstance(operation, Get):
             return self._parse_get(operation, wire)
-        if isinstance(operation, Increment):
+        if isinstance(operation, Arithmetic):
             arithmetic_status = self._mutation_status(operation, wire.rc)
             value = int(wire.value) if wire.rc == b"VA" and wire.value else None
             return ArithmeticResult(
@@ -291,7 +273,7 @@ class MetaProtocol:
         if rc == b"NF":
             return MutationStatus.NOT_FOUND
         if rc == b"NS":
-            if isinstance(operation, Set) and operation.condition is ABSENT:
+            if isinstance(operation, Set) and operation.mode == "add":
                 return MutationStatus.ALREADY_EXISTS
             return MutationStatus.NOT_FOUND
         return MutationStatus.FAILED
@@ -299,7 +281,7 @@ class MetaProtocol:
     @staticmethod
     def _pipeline_command(item: Prepared) -> MetaCommand:
         flags = item.command.flags + [b"O%d" % item.index]
-        needs_success_response = isinstance(item.operation, Increment) or (
+        needs_success_response = isinstance(item.operation, Arithmetic) or (
             isinstance(item.operation, Set) and item.operation.return_cas
         )
         if not needs_success_response:

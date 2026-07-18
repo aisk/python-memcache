@@ -61,7 +61,7 @@ Async usage mirrors the sync API with `AsyncMemcache` and `await`.
 > ]
 > ```
 
-`MetaClient` is an intent-oriented API for memcached's meta protocol. Common methods expose operations such as conditional reads, leases and conditional writes without exposing wire flags. Every result has an explicit status.
+`MetaClient` is a high-level client for memcached's meta protocol. The core methods (`get`/`set`/`delete`/`increment`/`batch`) cover the full protocol surface, while convenience wrappers such as `add`, `cas`, `invalidate` and `get_with_lease` package common usage patterns with safer defaults. Every result has an explicit status.
 
 ```python
 from memcache.experiment import Get, GetStatus, Meta, MetaClient, Set

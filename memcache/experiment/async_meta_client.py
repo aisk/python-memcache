@@ -35,16 +35,7 @@ from .meta_api import (
     parse_meta_result,
     positive,
 )
-from .operation import (
-    ABSENT,
-    PRESENT,
-    Delete,
-    Get,
-    IfCas,
-    Increment,
-    Operation,
-    Set,
-)
+from .operation import Arithmetic, Delete, Get, Operation, Set
 from .result import (
     ArithmeticResult,
     BatchResult,
@@ -71,6 +62,7 @@ class _Server:
         self._password = password
         self._connection: Optional[AsyncConnection] = None
         self._lock = anyio.Lock()
+        self._closed = False
 
     def __repr__(self) -> str:
         return "%s:%d" % self.addr
@@ -79,6 +71,8 @@ class _Server:
         self, commands: List[MetaCommand], timeout: Optional[float]
     ) -> List[MetaResult]:
         async with self._lock:
+            if self._closed:
+                raise RuntimeError("client is closed")
             if self._connection is None:
                 self._connection = AsyncConnection(
                     self.addr, username=self._username, password=self._password
@@ -101,6 +95,8 @@ class _Server:
         self, command: MetaCommand, timeout: Optional[float]
     ) -> MetaResult:
         async with self._lock:
+            if self._closed:
+                raise RuntimeError("client is closed")
             if self._connection is None:
                 self._connection = AsyncConnection(
                     self.addr, username=self._username, password=self._password
@@ -121,6 +117,8 @@ class _Server:
 
     async def flush(self, delay: int) -> None:
         async with self._lock:
+            if self._closed:
+                raise RuntimeError("client is closed")
             if self._connection is None:
                 self._connection = AsyncConnection(
                     self.addr, username=self._username, password=self._password
@@ -138,6 +136,7 @@ class _Server:
 
     async def close(self) -> None:
         async with self._lock:
+            self._closed = True
             connection, self._connection = self._connection, None
             if connection is not None:
                 await connection.close()
@@ -371,7 +370,7 @@ class AsyncMetaNamespace:
 
 
 class AsyncMetaClient(MetaProtocol):
-    """Intent-oriented meta protocol client with a batch-first executor."""
+    """High-level meta protocol client with a batch-first executor."""
 
     def __init__(
         self,
@@ -457,7 +456,7 @@ class AsyncMetaClient(MetaProtocol):
         async def fulfill(value: Any, **options: Any) -> MutationResult:
             if cas is None:
                 raise ProtocolError("lease response did not include CAS")
-            return await self.set(key, value, condition=IfCas(cas), **options)
+            return await self.set(key, value, compare_cas=cas, **options)
 
         return fulfill
 
@@ -522,14 +521,32 @@ class AsyncMetaClient(MetaProtocol):
         self,
         key: Key,
         *,
+        value: bool = True,
         meta: Meta = Meta.NONE,
         touch: Optional[int] = None,
         no_lru_bump: bool = False,
         unless_cas: Optional[int] = None,
+        lease_ttl: Optional[int] = None,
+        refresh_before: Optional[int] = None,
         timeout: Optional[float] = None,
     ) -> GetResult[Any]:
+        """Read a key; covers every mg capability.
+
+        With ``lease_ttl`` the result is a :class:`LeaseResult`; use
+        :meth:`get_with_lease` for the statically typed variant.
+        """
         return await self._one(  # type: ignore[return-value]
-            Get(key, meta, touch, no_lru_bump, unless_cas), timeout
+            Get(
+                key,
+                meta=meta,
+                touch=touch,
+                no_lru_bump=no_lru_bump,
+                unless_cas=unless_cas,
+                value=value,
+                lease_ttl=lease_ttl,
+                refresh_before=refresh_before,
+            ),
+            timeout,
         )
 
     async def inspect(
@@ -563,59 +580,82 @@ class AsyncMetaClient(MetaProtocol):
             timeout,
         )
 
-    async def get_many(
-        self,
-        keys: Sequence[Key],
-        *,
-        meta: Meta = Meta.NONE,
-        timeout: Optional[float] = None,
-    ) -> BatchResult:
-        return await self.batch([Get(key, meta=meta) for key in keys], timeout=timeout)
-
     async def set(
         self,
         key: Key,
         value: Any,
         *,
         ttl: Optional[int] = None,
-        condition: Any = None,
+        mode: str = "set",
+        compare_cas: Optional[int] = None,
+        version: Optional[int] = None,
+        return_cas: bool = False,
+        vivify_ttl: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> MutationResult:
+        """Store a key; covers every ms capability.
+
+        ``mode`` is one of ``set``/``add``/``replace``/``append``/``prepend``;
+        the concatenation modes take bytes only and skip serialization.
+        """
+        return await self._one(  # type: ignore[return-value]
+            Set(
+                key,
+                value,
+                ttl=ttl,
+                mode=mode,
+                compare_cas=compare_cas,
+                version=version,
+                return_cas=return_cas,
+                vivify_ttl=vivify_ttl,
+            ),
+            timeout,
+        )
+
+    async def add(
+        self,
+        key: Key,
+        value: Any,
+        *,
+        ttl: Optional[int] = None,
         version: Optional[int] = None,
         return_cas: bool = False,
         timeout: Optional[float] = None,
     ) -> MutationResult:
-        return await self._one(  # type: ignore[return-value]
-            Set(key, value, ttl, condition, version, return_cas), timeout
+        """Store only if the key does not exist; ALREADY_EXISTS otherwise."""
+        return await self.set(
+            key,
+            value,
+            ttl=ttl,
+            mode="add",
+            version=version,
+            return_cas=return_cas,
+            timeout=timeout,
         )
-
-    async def add(self, key: Key, value: Any, **options: Any) -> MutationResult:
-        options["condition"] = ABSENT
-        return await self.set(key, value, **options)
-
-    async def replace(self, key: Key, value: Any, **options: Any) -> MutationResult:
-        options["condition"] = PRESENT
-        return await self.set(key, value, **options)
 
     async def cas(
-        self, key: Key, value: Any, cas_token: int, **options: Any
-    ) -> MutationResult:
-        options["condition"] = IfCas(cas_token)
-        return await self.set(key, value, **options)
-
-    async def append_bytes(
         self,
         key: Key,
-        value: bytes,
+        value: Any,
+        cas_token: int,
         *,
-        vivify_ttl: Optional[int] = None,
+        ttl: Optional[int] = None,
+        version: Optional[int] = None,
+        return_cas: bool = False,
         timeout: Optional[float] = None,
     ) -> MutationResult:
-        if not isinstance(value, bytes):
-            raise TypeError("append_bytes requires bytes")
-        return await self._one(  # type: ignore[return-value]
-            Set(key, value, mode="append", vivify_ttl=vivify_ttl), timeout
+        """Store only if the item's CAS still matches; CAS_MISMATCH otherwise."""
+        return await self.set(
+            key,
+            value,
+            ttl=ttl,
+            compare_cas=cas_token,
+            version=version,
+            return_cas=return_cas,
+            timeout=timeout,
         )
 
-    async def prepend_bytes(
+    async def append(
         self,
         key: Key,
         value: bytes,
@@ -623,21 +663,33 @@ class AsyncMetaClient(MetaProtocol):
         vivify_ttl: Optional[int] = None,
         timeout: Optional[float] = None,
     ) -> MutationResult:
-        if not isinstance(value, bytes):
-            raise TypeError("prepend_bytes requires bytes")
-        return await self._one(  # type: ignore[return-value]
-            Set(key, value, mode="prepend", vivify_ttl=vivify_ttl), timeout
+        """Append bytes to an existing value; serialization is skipped."""
+        return await self.set(
+            key, value, mode="append", vivify_ttl=vivify_ttl, timeout=timeout
+        )
+
+    async def prepend(
+        self,
+        key: Key,
+        value: bytes,
+        *,
+        vivify_ttl: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> MutationResult:
+        """Prepend bytes to an existing value; serialization is skipped."""
+        return await self.set(
+            key, value, mode="prepend", vivify_ttl=vivify_ttl, timeout=timeout
         )
 
     async def delete(
         self,
         key: Key,
         *,
-        condition: Optional[IfCas] = None,
+        compare_cas: Optional[int] = None,
         timeout: Optional[float] = None,
     ) -> MutationResult:
         return await self._one(  # type: ignore[return-value]
-            Delete(key, condition), timeout
+            Delete(key, compare_cas=compare_cas), timeout
         )
 
     async def invalidate(
@@ -645,11 +697,12 @@ class AsyncMetaClient(MetaProtocol):
         key: Key,
         *,
         stale_for: Optional[int] = None,
-        condition: Optional[IfCas] = None,
+        compare_cas: Optional[int] = None,
         timeout: Optional[float] = None,
     ) -> MutationResult:
         return await self._one(  # type: ignore[return-value]
-            Delete(key, condition, invalidate=True, stale_for=stale_for), timeout
+            Delete(key, compare_cas=compare_cas, invalidate=True, stale_for=stale_for),
+            timeout,
         )
 
     async def increment(
@@ -660,32 +713,58 @@ class AsyncMetaClient(MetaProtocol):
         initial: Optional[int] = None,
         initial_ttl: Optional[int] = None,
         ttl: Optional[int] = None,
-        condition: Optional[IfCas] = None,
+        compare_cas: Optional[int] = None,
         version: Optional[int] = None,
         return_cas: bool = False,
+        return_ttl: bool = False,
         timeout: Optional[float] = None,
     ) -> ArithmeticResult:
+        """Increment a counter; overflows wrap around (unsigned 64-bit)."""
         return await self._one(  # type: ignore[return-value]
-            Increment(
+            Arithmetic(
                 key,
                 delta,
-                initial,
-                initial_ttl,
-                ttl,
-                False,
-                condition,
-                version,
-                return_cas,
+                initial=initial,
+                initial_ttl=initial_ttl,
+                ttl=ttl,
+                compare_cas=compare_cas,
+                version=version,
+                return_cas=return_cas,
+                return_ttl=return_ttl,
             ),
             timeout,
         )
 
     async def decrement(
-        self, key: Key, delta: int = 1, **options: Any
+        self,
+        key: Key,
+        delta: int = 1,
+        *,
+        initial: Optional[int] = None,
+        initial_ttl: Optional[int] = None,
+        ttl: Optional[int] = None,
+        compare_cas: Optional[int] = None,
+        version: Optional[int] = None,
+        return_cas: bool = False,
+        return_ttl: bool = False,
+        timeout: Optional[float] = None,
     ) -> ArithmeticResult:
-        timeout = options.pop("timeout", None) if "timeout" in options else None
-        operation = Increment(key, delta=delta, decrement=True, **options)
-        return await self._one(operation, timeout)  # type: ignore[return-value]
+        """Decrement a counter; saturates at zero instead of underflowing."""
+        return await self._one(  # type: ignore[return-value]
+            Arithmetic(
+                key,
+                delta,
+                decrement=True,
+                initial=initial,
+                initial_ttl=initial_ttl,
+                ttl=ttl,
+                compare_cas=compare_cas,
+                version=version,
+                return_cas=return_cas,
+                return_ttl=return_ttl,
+            ),
+            timeout,
+        )
 
     async def touch(
         self, key: Key, ttl: int, *, timeout: Optional[float] = None
@@ -705,6 +784,8 @@ class AsyncMetaClient(MetaProtocol):
         raise AssertionError("unexpected touch result")
 
     async def flush_all(self, delay: int = 0) -> None:
+        if self._closed:
+            raise RuntimeError("client is closed")
         positive("delay", delay)
         async with anyio.create_task_group() as tasks:
             for server in self._servers:

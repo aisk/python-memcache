@@ -6,6 +6,7 @@ import hashring
 from .connection import Addr, Connection, Pool  # re-export for backward compat
 from .errors import MemcacheError
 from .experiment.meta_client import MetaClient
+from .experiment.operation import Get
 from .experiment.result import GetStatus, Meta, MutationStatus
 from .meta_command import MetaCommand, MetaResult
 from .serialize import dump, load, DumpFunc, LoadFunc
@@ -153,18 +154,17 @@ class Memcache:
     def replace(
         self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> bool:
-        return (
-            self._meta.replace(key, value, ttl=expire).status is MutationStatus.STORED
-        )
+        result = self._meta.set(key, value, ttl=expire, mode="replace")
+        return result.status is MutationStatus.STORED
 
     def append(self, key: Union[bytes, str], value: Any) -> bool:
-        return self._meta.append_bytes(key, value).status is MutationStatus.STORED
+        return self._meta.append(key, value).status is MutationStatus.STORED
 
     def prepend(self, key: Union[bytes, str], value: Any) -> bool:
-        return self._meta.prepend_bytes(key, value).status is MutationStatus.STORED
+        return self._meta.prepend(key, value).status is MutationStatus.STORED
 
     def get_many(self, keys: List[Union[bytes, str]]) -> Dict[str, Any]:
-        results = self._meta.get_many(keys)
+        results = self._meta.batch([Get(key) for key in keys])
         return {
             r.key if isinstance(r.key, str) else r.key.decode("latin-1"): r.value
             for r in results

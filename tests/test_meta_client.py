@@ -4,15 +4,12 @@ import pytest
 
 from memcache import MetaCommand
 from memcache.experiment import (
-    ABSENT,
-    PRESENT,
     AmbiguousWriteError,
+    Arithmetic,
     ArithmeticResult,
     Delete,
     Get,
     GetStatus,
-    IfCas,
-    Increment,
     LeaseState,
     Meta,
     MetaClient,
@@ -140,10 +137,10 @@ def test_metadata_inspect_and_conditional_read(client):
         metadata.value
 
 
-def test_conditions_versions_and_conveniences(client):
-    assert client.set("condition", "first", condition=ABSENT)
+def test_store_modes_versions_and_conveniences(client):
+    assert client.set("condition", "first", mode="add")
     assert client.add("condition", "second").status is MutationStatus.ALREADY_EXISTS
-    assert client.replace("absent", "x").status is MutationStatus.NOT_FOUND
+    assert client.set("absent", "x", mode="replace").status is MutationStatus.NOT_FOUND
 
     old = client.get("condition", meta=Meta.CAS)
     assert (
@@ -168,7 +165,7 @@ def test_batch_is_ordered_pipeline_and_keeps_duplicates(client):
             Set("b", b"B"),
             Delete("absent"),
             Get("a"),
-            Increment("counter", initial=10, initial_ttl=60),
+            Arithmetic("counter", initial=10, initial_ttl=60),
         ]
     )
     assert len(results) == 6
@@ -180,7 +177,7 @@ def test_batch_is_ordered_pipeline_and_keeps_duplicates(client):
     assert isinstance(results[5], ArithmeticResult)
     assert results[5].value == 10
 
-    many = client.get_many(["a", b"missing", "a"])
+    many = client.batch([Get("a"), Get(b"missing"), Get("a")])
     assert [item.key for item in many] == ["a", b"missing", "a"]
     assert [item.status for item in many] == [
         GetStatus.HIT,
@@ -235,22 +232,24 @@ def test_lease_early_recache_stale_and_all_fulfill_outcomes(client):
 
 def test_byte_concatenation_arithmetic_touch_and_delete(client):
     client.set("bytes", b"middle")
-    assert client.append_bytes("bytes", b" end")
-    assert client.prepend_bytes("bytes", b"start ")
+    assert client.append("bytes", b" end")
+    assert client.prepend("bytes", b"start ")
     assert client.get("bytes").value == b"start middle end"
     with pytest.raises(TypeError):
-        client.append_bytes("bytes", "not bytes")
+        client.append("bytes", "not bytes")
 
     assert client.increment("n", initial=5, initial_ttl=60).value == 5
     assert client.increment("n", 3).value == 8
     assert client.decrement("n", 20).value == 0
+    counted = client.increment("n", 1, return_ttl=True)
+    assert counted.value == 1
+    assert counted.item.ttl is not None and counted.item.ttl > 0
     assert client.touch("n", 60).status is MutationStatus.STORED
     assert client.touch("no", 60).status is MutationStatus.NOT_FOUND
 
     current = client.get("n", meta=Meta.CAS)
     assert (
-        client.delete("n", condition=IfCas(current.item.cas)).status
-        is MutationStatus.STORED
+        client.delete("n", compare_cas=current.item.cas).status is MutationStatus.STORED
     )
     assert client.delete("n").status is MutationStatus.NOT_FOUND
 
@@ -401,14 +400,19 @@ def test_programming_errors_are_raised_before_batch(client):
     with pytest.raises(ValueError):
         client.batch([Get("a", refresh_before=10)])
     with pytest.raises(ValueError):
-        client.batch([Increment("n", initial=1)])
+        client.batch([Arithmetic("n", initial=1)])
     with pytest.raises(ValueError):
         client.batch([Delete("a", stale_for=10)])
+    with pytest.raises(ValueError):
+        client.set("a", "v", mode="upsert")
+    # Add only stores when no item exists, so there is no CAS to compare.
+    with pytest.raises(ValueError):
+        client.set("a", "v", mode="add", compare_cas=1)
+    # The server silently ignores T for append/prepend; the miss path takes
+    # its TTL from vivify_ttl instead.
+    with pytest.raises(ValueError):
+        client.batch([Set("a", b"v", mode="append", ttl=5)])
+    # Concatenation happens on raw bytes; serialized values would corrupt
+    # the stored item, so non-bytes payloads are rejected on any path.
     with pytest.raises(TypeError):
-        client.set("a", "v", condition=object())
-    # ABSENT/PRESENT map to a store mode; combining them with append/prepend
-    # would emit two conflicting M flags on the wire.
-    with pytest.raises(ValueError):
-        client.batch([Set("a", b"v", condition=ABSENT, mode="append")])
-    with pytest.raises(ValueError):
-        client.batch([Set("a", b"v", condition=PRESENT, mode="prepend")])
+        client.batch([Set("a", "not bytes", mode="prepend")])

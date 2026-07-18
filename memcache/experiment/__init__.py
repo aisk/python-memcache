@@ -2,7 +2,7 @@ from ..errors import AmbiguousWriteError, ProtocolError
 from .async_meta_client import AsyncMetaClient
 from .meta_api import MetaCommandResult
 from .meta_client import MetaClient
-from .operation import ABSENT, PRESENT, Delete, Get, IfCas, Increment, Set
+from .operation import Arithmetic, Delete, Get, Set
 from .result import (
     ArithmeticResult,
     BatchResult,
@@ -19,9 +19,8 @@ from .result import (
 )
 
 __all__ = [
-    "ABSENT",
-    "PRESENT",
     "AmbiguousWriteError",
+    "Arithmetic",
     "ArithmeticResult",
     "AsyncMetaClient",
     "BatchResult",
@@ -29,8 +28,6 @@ __all__ = [
     "Get",
     "GetResult",
     "GetStatus",
-    "IfCas",
-    "Increment",
     "ItemMeta",
     "LeaseResult",
     "LeaseState",

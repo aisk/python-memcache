@@ -4,7 +4,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 from .async_connection import AsyncConnection, AsyncPool  # noqa: F401 re-export
 from .connection import Addr
 from .errors import MemcacheError
-from .experiment import IfCas, Meta
+from .experiment import Get, Meta
 from .experiment.async_meta_client import AsyncMetaClient
 from .experiment.result import GetStatus, MutationStatus
 from .meta_command import MetaCommand, MetaResult
@@ -123,12 +123,7 @@ class AsyncMemcache:
         :param expire: Optional expiration time in seconds
         :raises MemcacheError: If the CAS token doesn't match or other error occurs
         """
-        result = await self._meta.set(
-            key,
-            value,
-            ttl=expire,
-            condition=IfCas(cas_token),
-        )
+        result = await self._meta.cas(key, value, cas_token, ttl=expire)
         if result.status is not MutationStatus.STORED:
             raise MemcacheError("CAS operation failed: token mismatch or other error")
 
@@ -148,22 +143,17 @@ class AsyncMemcache:
     async def replace(
         self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
     ) -> bool:
-        return (
-            await self._meta.replace(key, value, ttl=expire)
-        ).status is MutationStatus.STORED
+        result = await self._meta.set(key, value, ttl=expire, mode="replace")
+        return result.status is MutationStatus.STORED
 
     async def append(self, key: Union[bytes, str], value: Any) -> bool:
-        return (
-            await self._meta.append_bytes(key, value)
-        ).status is MutationStatus.STORED
+        return (await self._meta.append(key, value)).status is MutationStatus.STORED
 
     async def prepend(self, key: Union[bytes, str], value: Any) -> bool:
-        return (
-            await self._meta.prepend_bytes(key, value)
-        ).status is MutationStatus.STORED
+        return (await self._meta.prepend(key, value)).status is MutationStatus.STORED
 
     async def get_many(self, keys: List[Union[bytes, str]]) -> Dict[str, Any]:
-        results = await self._meta.get_many(keys)
+        results = await self._meta.batch([Get(key) for key in keys])
         return {
             r.key if isinstance(r.key, str) else r.key.decode("latin-1"): r.value
             for r in results

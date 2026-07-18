@@ -251,6 +251,14 @@ def build_set(
         raise ValueError("invalid store mode %r" % (mode,))
     if vivify_ttl is not None and mode not in ("append", "prepend"):
         raise ValueError("vivify_ttl is only valid for append/prepend")
+    if ttl is not None and mode in ("append", "prepend"):
+        # The server ignores T for concatenation; the miss path takes its
+        # TTL from N (vivify_ttl) instead. Reject the no-op.
+        raise ValueError("ttl is ignored for append/prepend; use vivify_ttl")
+    if compare_cas is not None and mode == "add":
+        # Add only stores when no item exists, so there is no CAS to
+        # compare; the protocol leaves the combination undefined.
+        raise ValueError("compare_cas cannot be combined with add mode")
     positive("client_flags", client_flags)
     positive("ttl", ttl)
     positive("compare_cas", compare_cas)
