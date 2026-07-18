@@ -9,7 +9,7 @@ from .experiment import Get, Meta
 from .experiment.async_meta_client import AsyncMetaClient
 from .experiment.result import GetStatus, MutationStatus
 from .meta_command import MetaCommand, MetaResult
-from .serialize import dump, load, DumpFunc, LoadFunc
+from .serialize import dump, load, DumpFunc, FuncSerializer, LoadFunc
 
 __all__ = ["AsyncConnection", "AsyncPool", "AsyncMemcache"]
 
@@ -56,8 +56,7 @@ class AsyncMemcache:
             addr,
             pool_size=pool_size,
             pool_timeout=pool_timeout,
-            load_func=load_func,
-            dump_func=dump_func,
+            serializer=FuncSerializer(dump_func, load_func),
             username=username,
             password=password,
         )

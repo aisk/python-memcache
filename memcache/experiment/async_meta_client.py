@@ -14,7 +14,7 @@ from ..async_connection import AsyncConnection, AsyncPool
 from ..connection import Addr
 from ..errors import AmbiguousWriteError, PipelineError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
-from ..serialize import DumpFunc, LoadFunc, dump, load
+from ..serialize import Serializer, StrictSerializer
 from ._meta_core import MetaProtocol, Prepared
 from .meta_api import (
     MetaCommandResult,
@@ -371,12 +371,11 @@ class AsyncMetaClient(MetaProtocol):
         pool_size: int | None = 23,
         pool_timeout: int | None = 1,
         timeout: float | None = 1.0,
-        load_func: LoadFunc = load,
-        dump_func: DumpFunc = dump,
+        serializer: Serializer | None = None,
         username: str | None = None,
         password: str | None = None,
     ) -> None:
-        super().__init__(load_func, dump_func)
+        super().__init__(serializer if serializer is not None else StrictSerializer())
         self.default_timeout = timeout
         addresses: list[Addr]
         if addr is None:

@@ -10,7 +10,7 @@ from .experiment.meta_client import MetaClient
 from .experiment.operation import Get
 from .experiment.result import GetStatus, Meta, MutationStatus
 from .meta_command import MetaCommand, MetaResult
-from .serialize import dump, load, DumpFunc, LoadFunc
+from .serialize import dump, load, DumpFunc, FuncSerializer, LoadFunc
 
 __all__ = ["Addr", "Connection", "Pool", "Memcache"]
 
@@ -57,8 +57,7 @@ class Memcache:
             addr,
             pool_size=pool_size,
             pool_timeout=pool_timeout,
-            load_func=load_func,
-            dump_func=dump_func,
+            serializer=FuncSerializer(dump_func, load_func),
             username=username,
             password=password,
         )

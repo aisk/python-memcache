@@ -11,6 +11,7 @@ from memcache.experiment import (
     LeaseState,
     Meta,
     MutationStatus,
+    PickleSerializer,
     Set,
     ValueState,
 )
@@ -30,13 +31,13 @@ async def flush(client):
 
 @pytest.mark.asyncio
 async def test_async_api_has_the_same_shape(client):
-    stored = await client.set("key", {"value": 1}, ttl=60, return_cas=True)
+    stored = await client.set("key", "value 1", ttl=60, return_cas=True)
     assert stored.status is MutationStatus.STORED
     assert stored.cas is not None
 
     result = await client.get("key", meta=Meta.CAS | Meta.TTL)
     assert result.status is GetStatus.HIT
-    assert result.value == {"value": 1}
+    assert result.value == "value 1"
     assert result.item.cas == stored.cas
 
     unchanged = await client.get("key", unless_cas=stored.cas)
@@ -61,6 +62,18 @@ async def test_async_lease_cursor(client):
     fulfilled = await winner.fulfill("ready", ttl=60)
     assert fulfilled.status is MutationStatus.STORED
     assert (await client.get("lease")).value == "ready"
+
+
+@pytest.mark.asyncio
+async def test_async_serializer_option(client):
+    with pytest.raises(TypeError):
+        await client.set("obj", {"value": 1})
+    async with AsyncMetaClient(
+        ("localhost", 11211), serializer=PickleSerializer()
+    ) as pickled:
+        stored = await pickled.set("obj", {"value": 1})
+        assert stored.status is MutationStatus.STORED
+        assert (await pickled.get("obj")).value == {"value": 1}
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,10 @@
-from ..errors import AmbiguousWriteError, ProtocolError
+from ..errors import AmbiguousWriteError, ProtocolError, SerializeError
+from ..serialize import (
+    JsonSerializer,
+    PickleSerializer,
+    Serializer,
+    StrictSerializer,
+)
 from .async_meta_client import AsyncMetaClient
 from .meta_api import MetaCommandResult
 from .meta_client import MetaClient
@@ -29,6 +35,7 @@ __all__ = [
     "GetResult",
     "GetStatus",
     "ItemMeta",
+    "JsonSerializer",
     "LeaseResult",
     "LeaseState",
     "Meta",
@@ -36,8 +43,12 @@ __all__ = [
     "MetaCommandResult",
     "MutationResult",
     "MutationStatus",
+    "PickleSerializer",
     "ProtocolError",
     "ResultValueError",
+    "SerializeError",
+    "Serializer",
     "Set",
+    "StrictSerializer",
     "ValueState",
 ]

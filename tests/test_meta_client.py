@@ -10,11 +10,14 @@ from memcache.experiment import (
     Delete,
     Get,
     GetStatus,
+    JsonSerializer,
     LeaseState,
     Meta,
     MetaClient,
     MutationStatus,
+    PickleSerializer,
     ResultValueError,
+    SerializeError,
     Set,
     ValueState,
 )
@@ -24,6 +27,13 @@ from memcache.errors import MemcacheError, PipelineError
 @pytest.fixture()
 def client():
     with MetaClient(("localhost", 11211)) as value:
+        value.flush_all()
+        yield value
+
+
+@pytest.fixture()
+def pickle_client():
+    with MetaClient(("localhost", 11211), serializer=PickleSerializer()) as value:
         value.flush_all()
         yield value
 
@@ -98,15 +108,48 @@ def test_explicit_get_states_and_values(client):
     with pytest.raises(ResultValueError):
         client.get("missing").value
 
-    client.set("none", None)
-    none = client.get("none")
+    client.set("empty", b"")
+    assert client.get("empty").value == b""
+    assert client.get("missing").value_or("fallback") == "fallback"
+
+
+def test_default_serializer_is_strict(client, pickle_client):
+    with pytest.raises(TypeError):
+        client.set("obj", {"a": 1})
+    with pytest.raises(TypeError):
+        client.set("none", None)
+    with pytest.raises(TypeError):
+        client.set("flag", True)
+
+    # Refusing to unpickle matters more than refusing to pickle: loads is
+    # the code-execution side. Reads of foreign pickled data must fail.
+    pickle_client.set("pickled", {"a": 1})
+    result = client.get("pickled")
+    assert result.status is GetStatus.FAILED
+    assert isinstance(result.error, SerializeError)
+
+
+def test_pickle_serializer_round_trips_objects(pickle_client):
+    pickle_client.set("none", None)
+    none = pickle_client.get("none")
     assert none.status is GetStatus.HIT
     assert none.value is None
     assert bool(none)
 
-    client.set("empty", b"")
-    assert client.get("empty").value == b""
-    assert client.get("missing").value_or("fallback") == "fallback"
+    pickle_client.set("obj", {"a": 1})
+    assert pickle_client.get("obj").value == {"a": 1}
+
+    pickle_client.set("flag", True)
+    assert pickle_client.get("flag").value is True
+
+
+def test_json_serializer_round_trips_objects():
+    with MetaClient(("localhost", 11211), serializer=JsonSerializer()) as client:
+        client.set("doc", {"a": [1, None, True]})
+        assert client.get("doc").value == {"a": [1, None, True]}
+        # Primitive flags are shared across serializers.
+        client.set("n", 7)
+        assert client.get("n").value == 7
 
 
 def test_metadata_inspect_and_conditional_read(client):
@@ -202,8 +245,8 @@ def test_lease_miss_pending_and_fulfill(client):
     assert loser.value_state is ValueState.MISSING
     assert loser.lease_state is LeaseState.BUSY
 
-    assert winner.fulfill({"ready": True}, ttl=60).status is MutationStatus.STORED
-    assert client.get("report").value == {"ready": True}
+    assert winner.fulfill("ready", ttl=60).status is MutationStatus.STORED
+    assert client.get("report").value == "ready"
 
 
 def test_lease_early_recache_stale_and_all_fulfill_outcomes(client):

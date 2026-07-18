@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 
 from ..errors import MemcacheError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
-from ..serialize import DumpFunc, LoadFunc
+from ..serialize import Serializer
 from .meta_api import (
     MetaCommandResult,
     build_arithmetic,
@@ -46,9 +46,8 @@ class Prepared:
 class MetaProtocol:
     """Transport-independent meta command construction and result parsing."""
 
-    def __init__(self, load_func: LoadFunc, dump_func: DumpFunc) -> None:
-        self._load = load_func
-        self._dump = dump_func
+    def __init__(self, serializer: Serializer) -> None:
+        self._serializer = serializer
 
     def _lease_fulfill(self, key: Key, cas: int | None) -> Callable[..., Any]:
         raise NotImplementedError
@@ -111,7 +110,7 @@ class MetaProtocol:
                 raise TypeError("%s requires a bytes value" % operation.mode)
             raw, client_flags = operation.value, None
         else:
-            raw, client_flags = self._dump(key, operation.value)
+            raw, client_flags = self._serializer.dump(key, operation.value)
         command = build_set(
             operation.key,
             raw,
@@ -245,7 +244,7 @@ class MetaProtocol:
             status = GetStatus.HIT
             has_value = wire.rc == b"VA" and wire.value is not None
             if has_value:
-                value = self._load(
+                value = self._serializer.load(
                     key_bytes(operation.key),
                     wire.value or b"",
                     wire.client_flags or 0,
