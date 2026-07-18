@@ -3,15 +3,9 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import (
     Any,
-    AsyncIterator,
-    Dict,
-    List,
-    Optional,
-    Sequence,
-    Tuple,
-    Union,
     cast,
 )
+from collections.abc import AsyncIterator, Sequence
 
 import anyio
 import hashring
@@ -54,13 +48,13 @@ class _Server:
     def __init__(
         self,
         addr: Addr,
-        username: Optional[str],
-        password: Optional[str],
+        username: str | None,
+        password: str | None,
     ) -> None:
         self.addr = addr
         self._username = username
         self._password = password
-        self._connection: Optional[AsyncConnection] = None
+        self._connection: AsyncConnection | None = None
         self._lock = anyio.Lock()
         self._closed = False
 
@@ -68,8 +62,8 @@ class _Server:
         return "%s:%d" % self.addr
 
     async def pipeline(
-        self, commands: List[MetaCommand], timeout: Optional[float]
-    ) -> List[MetaResult]:
+        self, commands: list[MetaCommand], timeout: float | None
+    ) -> list[MetaResult]:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("client is closed")
@@ -91,9 +85,7 @@ class _Server:
                         pass
                 raise
 
-    async def execute(
-        self, command: MetaCommand, timeout: Optional[float]
-    ) -> MetaResult:
+    async def execute(self, command: MetaCommand, timeout: float | None) -> MetaResult:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("client is closed")
@@ -149,11 +141,11 @@ class AsyncMetaNamespace:
     see that class for the layer's contract.
     """
 
-    def __init__(self, client: "AsyncMetaClient") -> None:
+    def __init__(self, client: AsyncMetaClient) -> None:
         self._client = client
 
     async def _run(
-        self, command: MetaCommand, timeout: Optional[float]
+        self, command: MetaCommand, timeout: float | None
     ) -> MetaCommandResult:
         return parse_meta_result(
             await self._client.execute_meta_command(command, timeout=timeout)
@@ -171,14 +163,14 @@ class AsyncMetaNamespace:
         return_hit_before: bool = False,
         return_client_flags: bool = False,
         return_key: bool = False,
-        touch: Optional[int] = None,
-        vivify_ttl: Optional[int] = None,
-        recache_ttl: Optional[int] = None,
-        unless_cas: Optional[int] = None,
-        new_cas: Optional[int] = None,
+        touch: int | None = None,
+        vivify_ttl: int | None = None,
+        recache_ttl: int | None = None,
+        unless_cas: int | None = None,
+        new_cas: int | None = None,
         no_lru_bump: bool = False,
-        opaque: Optional[Token] = None,
-        timeout: Optional[float] = None,
+        opaque: Token | None = None,
+        timeout: float | None = None,
     ) -> MetaCommandResult:
         command = build_get(
             key,
@@ -205,18 +197,18 @@ class AsyncMetaNamespace:
         key: Key,
         value: bytes,
         *,
-        client_flags: Optional[int] = None,
-        ttl: Optional[int] = None,
+        client_flags: int | None = None,
+        ttl: int | None = None,
         mode: str = "set",
-        compare_cas: Optional[int] = None,
-        new_cas: Optional[int] = None,
+        compare_cas: int | None = None,
+        new_cas: int | None = None,
         invalidate: bool = False,
-        vivify_ttl: Optional[int] = None,
+        vivify_ttl: int | None = None,
         return_cas: bool = False,
         return_size: bool = False,
         return_key: bool = False,
-        opaque: Optional[Token] = None,
-        timeout: Optional[float] = None,
+        opaque: Token | None = None,
+        timeout: float | None = None,
     ) -> MetaCommandResult:
         command = build_set(
             key,
@@ -239,14 +231,14 @@ class AsyncMetaNamespace:
         self,
         key: Key,
         *,
-        compare_cas: Optional[int] = None,
-        new_cas: Optional[int] = None,
+        compare_cas: int | None = None,
+        new_cas: int | None = None,
         invalidate: bool = False,
-        ttl: Optional[int] = None,
+        ttl: int | None = None,
         drop_value: bool = False,
         return_key: bool = False,
-        opaque: Optional[Token] = None,
-        timeout: Optional[float] = None,
+        opaque: Token | None = None,
+        timeout: float | None = None,
     ) -> MetaCommandResult:
         command = build_delete(
             key,
@@ -264,19 +256,19 @@ class AsyncMetaNamespace:
         self,
         key: Key,
         *,
-        delta: Optional[int] = None,
+        delta: int | None = None,
         decrement: bool = False,
-        initial: Optional[int] = None,
-        initial_ttl: Optional[int] = None,
-        ttl: Optional[int] = None,
-        compare_cas: Optional[int] = None,
-        new_cas: Optional[int] = None,
+        initial: int | None = None,
+        initial_ttl: int | None = None,
+        ttl: int | None = None,
+        compare_cas: int | None = None,
+        new_cas: int | None = None,
         return_value: bool = True,
         return_ttl: bool = False,
         return_cas: bool = False,
         return_key: bool = False,
-        opaque: Optional[Token] = None,
-        timeout: Optional[float] = None,
+        opaque: Token | None = None,
+        timeout: float | None = None,
     ) -> MetaCommandResult:
         command = build_arithmetic(
             key,
@@ -296,8 +288,8 @@ class AsyncMetaNamespace:
         return await self._run(command, timeout)
 
     async def debug(
-        self, key: Key, *, timeout: Optional[float] = None
-    ) -> Optional[Dict[str, str]]:
+        self, key: Key, *, timeout: float | None = None
+    ) -> dict[str, str] | None:
         return parse_debug_result(
             await self._client.execute_meta_command(build_debug(key), timeout=timeout)
         )
@@ -305,11 +297,11 @@ class AsyncMetaNamespace:
     async def execute(
         self,
         *,
-        command: Union[str, bytes],
+        command: str | bytes,
         key: Key,
         flags: Sequence[bytes] = (),
-        value: Optional[bytes] = None,
-        timeout: Optional[float] = None,
+        value: bytes | None = None,
+        timeout: float | None = None,
     ) -> MetaResult:
         cm = command.encode("ascii") if isinstance(command, str) else command
         if len(cm) != 2:
@@ -329,19 +321,19 @@ class AsyncMetaNamespace:
         self,
         commands: Sequence[MetaCommand],
         *,
-        timeout: Optional[float] = None,
-    ) -> List[MetaResult]:
+        timeout: float | None = None,
+    ) -> list[MetaResult]:
         # Meta batch does not infer quiet outcomes; require one response per
         # command so output can retain input order across server shards.
         if self._client._closed:
             raise RuntimeError("client is closed")
-        grouped: Dict[_Server, List[Tuple[int, MetaCommand]]] = {}
+        grouped: dict[_Server, list[tuple[int, MetaCommand]]] = {}
         for index, command in enumerate(commands):
             if b"q" in command.flags:
                 raise ValueError("meta batch does not accept quiet commands")
             server = self._client._server_for(command.key)
             grouped.setdefault(server, []).append((index, command))
-        output: List[Optional[MetaResult]] = [None] * len(commands)
+        output: list[MetaResult | None] = [None] * len(commands)
         async with anyio.create_task_group() as tasks:
             for server, group in grouped.items():
                 tasks.start_soon(
@@ -353,14 +345,14 @@ class AsyncMetaNamespace:
                 )
         if any(result is None for result in output):
             raise ProtocolError("meta batch left an operation unresolved")
-        return cast(List[MetaResult], output)
+        return cast(list[MetaResult], output)
 
     @staticmethod
     async def _run_group(
         server: _Server,
-        group: List[Tuple[int, MetaCommand]],
-        output: List[Optional[MetaResult]],
-        timeout: Optional[float],
+        group: list[tuple[int, MetaCommand]],
+        output: list[MetaResult | None],
+        timeout: float | None,
     ) -> None:
         responses = await server.pipeline([command for _, command in group], timeout)
         if len(responses) != len(group):
@@ -374,19 +366,19 @@ class AsyncMetaClient(MetaProtocol):
 
     def __init__(
         self,
-        addr: Union[Addr, List[Addr], None] = None,
+        addr: Addr | list[Addr] | None = None,
         *,
-        pool_size: Optional[int] = 23,
-        pool_timeout: Optional[int] = 1,
-        timeout: Optional[float] = 1.0,
+        pool_size: int | None = 23,
+        pool_timeout: int | None = 1,
+        timeout: float | None = 1.0,
         load_func: LoadFunc = load,
         dump_func: DumpFunc = dump,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
+        username: str | None = None,
+        password: str | None = None,
     ) -> None:
         super().__init__(load_func, dump_func)
         self.default_timeout = timeout
-        addresses: List[Addr]
+        addresses: list[Addr]
         if addr is None:
             addresses = [("localhost", 11211)]
         elif isinstance(addr, tuple) and len(addr) == 2:
@@ -413,13 +405,13 @@ class AsyncMetaClient(MetaProtocol):
         self.meta = AsyncMetaNamespace(self)
         self._closed = False
 
-    async def __aenter__(self) -> "AsyncMetaClient":
+    async def __aenter__(self) -> AsyncMetaClient:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
         await self.close()
 
-    def _timeout(self, timeout: Optional[float]) -> Optional[float]:
+    def _timeout(self, timeout: float | None) -> float | None:
         return self.default_timeout if timeout is None else timeout
 
     def _server_for(self, key: Key) -> _Server:
@@ -444,7 +436,7 @@ class AsyncMetaClient(MetaProtocol):
             await pool.close()
 
     async def execute_meta_command(
-        self, command: MetaCommand, *, timeout: Optional[float] = None
+        self, command: MetaCommand, *, timeout: float | None = None
     ) -> MetaResult:
         if self._closed:
             raise RuntimeError("client is closed")
@@ -452,7 +444,7 @@ class AsyncMetaClient(MetaProtocol):
             command, self._timeout(timeout)
         )
 
-    def _lease_fulfill(self, key: Key, cas: Optional[int]) -> Any:
+    def _lease_fulfill(self, key: Key, cas: int | None) -> Any:
         async def fulfill(value: Any, **options: Any) -> MutationResult:
             if cas is None:
                 raise ProtocolError("lease response did not include CAS")
@@ -463,14 +455,14 @@ class AsyncMetaClient(MetaProtocol):
     async def _run_group(
         self,
         server: _Server,
-        prepared: List[Prepared],
-        output: List[Optional[Result]],
-        timeout: Optional[float],
+        prepared: list[Prepared],
+        output: list[Result | None],
+        timeout: float | None,
     ) -> None:
         commands = [self._pipeline_command(item) for item in prepared]
-        responses: List[MetaResult] = []
+        responses: list[MetaResult] = []
         written = 0
-        failure: Optional[BaseException] = None
+        failure: BaseException | None = None
         barrier = False
         try:
             responses = await server.pipeline(commands, timeout)
@@ -488,15 +480,15 @@ class AsyncMetaClient(MetaProtocol):
         self,
         operations: Sequence[Operation],
         *,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> BatchResult:
         if self._closed:
             raise RuntimeError("client is closed")
         prepared = [self._prepare(index, op) for index, op in enumerate(operations)]
-        grouped: Dict[_Server, List[Prepared]] = {}
+        grouped: dict[_Server, list[Prepared]] = {}
         for item in prepared:
             grouped.setdefault(self._server_for(item.operation.key), []).append(item)
-        output: List[Optional[Result]] = [None] * len(prepared)
+        output: list[Result | None] = [None] * len(prepared)
         async with anyio.create_task_group() as tasks:
             for server, group in grouped.items():
                 tasks.start_soon(
@@ -510,7 +502,7 @@ class AsyncMetaClient(MetaProtocol):
             raise AssertionError("batch executor left an operation unresolved")
         return BatchResult(output)  # type: ignore[arg-type]
 
-    async def _one(self, operation: Operation, timeout: Optional[float]) -> Result:
+    async def _one(self, operation: Operation, timeout: float | None) -> Result:
         result = cast(Result, (await self.batch([operation], timeout=timeout))[0])
         status = result.status
         if status in (GetStatus.AMBIGUOUS, MutationStatus.AMBIGUOUS):
@@ -523,12 +515,12 @@ class AsyncMetaClient(MetaProtocol):
         *,
         value: bool = True,
         meta: Meta = Meta.NONE,
-        touch: Optional[int] = None,
+        touch: int | None = None,
         no_lru_bump: bool = False,
-        unless_cas: Optional[int] = None,
-        lease_ttl: Optional[int] = None,
-        refresh_before: Optional[int] = None,
-        timeout: Optional[float] = None,
+        unless_cas: int | None = None,
+        lease_ttl: int | None = None,
+        refresh_before: int | None = None,
+        timeout: float | None = None,
     ) -> GetResult[Any]:
         """Read a key; covers every mg capability.
 
@@ -555,7 +547,7 @@ class AsyncMetaClient(MetaProtocol):
         *,
         meta: Meta = Meta.CAS | Meta.TTL | Meta.SIZE,
         no_lru_bump: bool = True,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> GetResult[Any]:
         return await self._one(  # type: ignore[return-value]
             Get(key, meta=meta, no_lru_bump=no_lru_bump, value=False), timeout
@@ -566,9 +558,9 @@ class AsyncMetaClient(MetaProtocol):
         key: Key,
         *,
         lease_ttl: int,
-        refresh_before: Optional[int] = None,
+        refresh_before: int | None = None,
         meta: Meta = Meta.NONE,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> LeaseResult[Any]:
         return await self._one(  # type: ignore[return-value]
             Get(
@@ -585,13 +577,13 @@ class AsyncMetaClient(MetaProtocol):
         key: Key,
         value: Any,
         *,
-        ttl: Optional[int] = None,
+        ttl: int | None = None,
         mode: str = "set",
-        compare_cas: Optional[int] = None,
-        version: Optional[int] = None,
+        compare_cas: int | None = None,
+        version: int | None = None,
         return_cas: bool = False,
-        vivify_ttl: Optional[int] = None,
-        timeout: Optional[float] = None,
+        vivify_ttl: int | None = None,
+        timeout: float | None = None,
     ) -> MutationResult:
         """Store a key; covers every ms capability.
 
@@ -617,10 +609,10 @@ class AsyncMetaClient(MetaProtocol):
         key: Key,
         value: Any,
         *,
-        ttl: Optional[int] = None,
-        version: Optional[int] = None,
+        ttl: int | None = None,
+        version: int | None = None,
         return_cas: bool = False,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> MutationResult:
         """Store only if the key does not exist; ALREADY_EXISTS otherwise."""
         return await self.set(
@@ -639,10 +631,10 @@ class AsyncMetaClient(MetaProtocol):
         value: Any,
         cas_token: int,
         *,
-        ttl: Optional[int] = None,
-        version: Optional[int] = None,
+        ttl: int | None = None,
+        version: int | None = None,
         return_cas: bool = False,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> MutationResult:
         """Store only if the item's CAS still matches; CAS_MISMATCH otherwise."""
         return await self.set(
@@ -660,8 +652,8 @@ class AsyncMetaClient(MetaProtocol):
         key: Key,
         value: bytes,
         *,
-        vivify_ttl: Optional[int] = None,
-        timeout: Optional[float] = None,
+        vivify_ttl: int | None = None,
+        timeout: float | None = None,
     ) -> MutationResult:
         """Append bytes to an existing value; serialization is skipped."""
         return await self.set(
@@ -673,8 +665,8 @@ class AsyncMetaClient(MetaProtocol):
         key: Key,
         value: bytes,
         *,
-        vivify_ttl: Optional[int] = None,
-        timeout: Optional[float] = None,
+        vivify_ttl: int | None = None,
+        timeout: float | None = None,
     ) -> MutationResult:
         """Prepend bytes to an existing value; serialization is skipped."""
         return await self.set(
@@ -685,8 +677,8 @@ class AsyncMetaClient(MetaProtocol):
         self,
         key: Key,
         *,
-        compare_cas: Optional[int] = None,
-        timeout: Optional[float] = None,
+        compare_cas: int | None = None,
+        timeout: float | None = None,
     ) -> MutationResult:
         return await self._one(  # type: ignore[return-value]
             Delete(key, compare_cas=compare_cas), timeout
@@ -696,9 +688,9 @@ class AsyncMetaClient(MetaProtocol):
         self,
         key: Key,
         *,
-        stale_for: Optional[int] = None,
-        compare_cas: Optional[int] = None,
-        timeout: Optional[float] = None,
+        stale_for: int | None = None,
+        compare_cas: int | None = None,
+        timeout: float | None = None,
     ) -> MutationResult:
         return await self._one(  # type: ignore[return-value]
             Delete(key, compare_cas=compare_cas, invalidate=True, stale_for=stale_for),
@@ -710,14 +702,14 @@ class AsyncMetaClient(MetaProtocol):
         key: Key,
         delta: int = 1,
         *,
-        initial: Optional[int] = None,
-        initial_ttl: Optional[int] = None,
-        ttl: Optional[int] = None,
-        compare_cas: Optional[int] = None,
-        version: Optional[int] = None,
+        initial: int | None = None,
+        initial_ttl: int | None = None,
+        ttl: int | None = None,
+        compare_cas: int | None = None,
+        version: int | None = None,
         return_cas: bool = False,
         return_ttl: bool = False,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> ArithmeticResult:
         """Increment a counter; overflows wrap around (unsigned 64-bit)."""
         return await self._one(  # type: ignore[return-value]
@@ -740,14 +732,14 @@ class AsyncMetaClient(MetaProtocol):
         key: Key,
         delta: int = 1,
         *,
-        initial: Optional[int] = None,
-        initial_ttl: Optional[int] = None,
-        ttl: Optional[int] = None,
-        compare_cas: Optional[int] = None,
-        version: Optional[int] = None,
+        initial: int | None = None,
+        initial_ttl: int | None = None,
+        ttl: int | None = None,
+        compare_cas: int | None = None,
+        version: int | None = None,
         return_cas: bool = False,
         return_ttl: bool = False,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> ArithmeticResult:
         """Decrement a counter; saturates at zero instead of underflowing."""
         return await self._one(  # type: ignore[return-value]
@@ -767,7 +759,7 @@ class AsyncMetaClient(MetaProtocol):
         )
 
     async def touch(
-        self, key: Key, ttl: int, *, timeout: Optional[float] = None
+        self, key: Key, ttl: int, *, timeout: float | None = None
     ) -> MutationResult:
         result = await self._one(Get(key, touch=ttl, value=False), timeout)
         if isinstance(result, GetResult):

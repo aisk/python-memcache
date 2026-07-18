@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, IntFlag, auto
-from typing import Any, Callable, Generic, Iterator, Optional, Sequence, TypeVar, Union
+from typing import Any, Generic, TypeVar
+from collections.abc import Callable, Iterator, Sequence
 
 from ..errors import MemcacheError
 
 
 T = TypeVar("T")
-Key = Union[str, bytes]
+Key = str | bytes
 _NO_VALUE = object()
 
 
@@ -53,11 +54,11 @@ class Meta(IntFlag):
 
 @dataclass(frozen=True)
 class ItemMeta:
-    cas: Optional[int] = None
-    ttl: Optional[int] = None
-    size: Optional[int] = None
-    last_access: Optional[int] = None
-    hit_before: Optional[bool] = None
+    cas: int | None = None
+    ttl: int | None = None
+    size: int | None = None
+    last_access: int | None = None
+    hit_before: bool | None = None
 
 
 class ResultValueError(MemcacheError):
@@ -71,10 +72,10 @@ class GetResult(Generic[T]):
         key: Key,
         status: GetStatus,
         value: Any = _NO_VALUE,
-        item: Optional[ItemMeta] = None,
+        item: ItemMeta | None = None,
         value_state: ValueState = ValueState.MISSING,
         lease_state: LeaseState = LeaseState.NONE,
-        error: Optional[BaseException] = None,
+        error: BaseException | None = None,
     ) -> None:
         self.key = key
         self.status = status
@@ -103,23 +104,23 @@ class GetResult(Generic[T]):
     # Transitional metadata aliases. They cost nothing and make migration from
     # the first experimental prototype less abrupt.
     @property
-    def cas_token(self) -> Optional[int]:
+    def cas_token(self) -> int | None:
         return self.item.cas
 
     @property
-    def ttl(self) -> Optional[int]:
+    def ttl(self) -> int | None:
         return self.item.ttl
 
     @property
-    def size(self) -> Optional[int]:
+    def size(self) -> int | None:
         return self.item.size
 
     @property
-    def last_access(self) -> Optional[int]:
+    def last_access(self) -> int | None:
         return self.item.last_access
 
     @property
-    def hit_before(self) -> Optional[bool]:
+    def hit_before(self) -> bool | None:
         return self.item.hit_before
 
     @property
@@ -144,10 +145,10 @@ class LeaseResult(GetResult[T]):
         self,
         value: T,
         *,
-        ttl: Optional[int] = None,
-        version: Optional[int] = None,
+        ttl: int | None = None,
+        version: int | None = None,
         return_cas: bool = False,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> Any:
         if self.lease_state is not LeaseState.GRANTED:
             raise MemcacheError("only the lease winner can fulfill a refresh")
@@ -164,8 +165,8 @@ class LeaseResult(GetResult[T]):
 class MutationResult:
     key: Key
     status: MutationStatus
-    cas: Optional[int] = None
-    error: Optional[BaseException] = None
+    cas: int | None = None
+    error: BaseException | None = None
 
     def __bool__(self) -> bool:
         return self.status is MutationStatus.STORED
@@ -175,15 +176,15 @@ class MutationResult:
 class ArithmeticResult:
     key: Key
     status: MutationStatus
-    value: Optional[int] = None
+    value: int | None = None
     item: ItemMeta = ItemMeta()
-    error: Optional[BaseException] = None
+    error: BaseException | None = None
 
     def __bool__(self) -> bool:
         return self.status is MutationStatus.STORED
 
 
-Result = Union[GetResult[Any], MutationResult, ArithmeticResult]
+Result = GetResult[Any] | MutationResult | ArithmeticResult
 
 
 class BatchResult(Sequence[Result]):

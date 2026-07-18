@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any
+from collections.abc import Callable, Sequence
 
 from ..errors import MemcacheError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
@@ -49,7 +50,7 @@ class MetaProtocol:
         self._load = load_func
         self._dump = dump_func
 
-    def _lease_fulfill(self, key: Key, cas: Optional[int]) -> Callable[..., Any]:
+    def _lease_fulfill(self, key: Key, cas: int | None) -> Callable[..., Any]:
         raise NotImplementedError
 
     def _prepare(self, index: int, operation: Operation) -> Prepared:
@@ -102,7 +103,7 @@ class MetaProtocol:
     def _prepare_set(self, index: int, operation: Set, key: bytes) -> Prepared:
         positive("version", operation.version)
         positive("vivify_ttl", operation.vivify_ttl, allow_zero=False)
-        client_flags: Optional[int]
+        client_flags: int | None
         if operation.mode in ("append", "prepend"):
             # The server concatenates raw bytes; a serialized payload would
             # corrupt the stored value, so concatenation takes bytes only.
@@ -173,7 +174,7 @@ class MetaProtocol:
             return ArithmeticResult(operation.key, mutation_status, error=error)
         return MutationResult(operation.key, mutation_status, error=error)
 
-    def _parse(self, prepared: Prepared, response: Optional[MetaResult]) -> Result:
+    def _parse(self, prepared: Prepared, response: MetaResult | None) -> Result:
         operation = prepared.operation
         if response is None:
             if isinstance(operation, Get):
@@ -249,7 +250,7 @@ class MetaProtocol:
                     wire.value or b"",
                     wire.client_flags or 0,
                 )
-        kwargs: Dict[str, Any] = dict(
+        kwargs: dict[str, Any] = dict(
             key=operation.key,
             status=status,
             item=item,
@@ -297,9 +298,9 @@ class MetaProtocol:
     @staticmethod
     def _index_responses(
         responses: Sequence[MetaResult],
-    ) -> Tuple[Dict[int, MetaResult], Optional[BaseException]]:
-        by_index: Dict[int, MetaResult] = {}
-        failure: Optional[BaseException] = None
+    ) -> tuple[dict[int, MetaResult], BaseException | None]:
+        by_index: dict[int, MetaResult] = {}
+        failure: BaseException | None = None
         for response in responses:
             opaque = response_flags(response.flags).get("opaque")
             if opaque is None:
@@ -313,9 +314,9 @@ class MetaProtocol:
 
     def _record_parsed(
         self,
-        output: List[Optional[Result]],
+        output: list[Result | None],
         item: Prepared,
-        response: Optional[MetaResult],
+        response: MetaResult | None,
     ) -> None:
         try:
             output[item.index] = self._parse(item, response)
@@ -324,12 +325,12 @@ class MetaProtocol:
 
     def _resolve_group(
         self,
-        prepared: List[Prepared],
-        output: List[Optional[Result]],
+        prepared: list[Prepared],
+        output: list[Result | None],
         responses: Sequence[MetaResult],
         written: int,
         barrier: bool,
-        failure: Optional[BaseException],
+        failure: BaseException | None,
     ) -> None:
         by_index, index_failure = self._index_responses(responses)
         if index_failure is not None:

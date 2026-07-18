@@ -17,18 +17,19 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any
+from collections.abc import Iterable
 
 from ..errors import ProtocolError
 from ..meta_command import MetaCommand, MetaResult, encode_key
 from .result import Key
 
 
-Token = Union[bytes, str, int]
+Token = bytes | str | int
 
 _OPAQUE_MAX = 32
 
-_STORE_MODES: Dict[str, Optional[bytes]] = {
+_STORE_MODES: dict[str, bytes | None] = {
     "set": None,
     "add": b"ME",
     "replace": b"MR",
@@ -45,7 +46,7 @@ def key_bytes(key: Key) -> bytes:
     raise TypeError("key must be str or bytes")
 
 
-def positive(name: str, value: Optional[int], *, allow_zero: bool = True) -> None:
+def positive(name: str, value: int | None, *, allow_zero: bool = True) -> None:
     if value is None:
         return
     minimum = 0 if allow_zero else 1
@@ -64,8 +65,8 @@ _MARKER_RESPONSE_FLAGS = {"W": "won", "Z": "busy", "X": "stale", "b": "key_base6
 _TOKEN_RESPONSE_FLAGS = {"O": "opaque", "k": "key"}
 
 
-def response_flags(flags: Iterable[bytes]) -> Dict[str, Any]:
-    parsed: Dict[str, Any] = {}
+def response_flags(flags: Iterable[bytes]) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
     for flag in flags:
         if not flag:
             continue
@@ -93,19 +94,19 @@ class MetaCommandResult:
     """
 
     rc: bytes
-    value: Optional[bytes] = None
-    cas: Optional[int] = None
-    ttl: Optional[int] = None
-    client_flags: Optional[int] = None
-    size: Optional[int] = None
-    last_access: Optional[int] = None
-    hit_before: Optional[bool] = None
-    key: Optional[bytes] = None
-    opaque: Optional[bytes] = None
+    value: bytes | None = None
+    cas: int | None = None
+    ttl: int | None = None
+    client_flags: int | None = None
+    size: int | None = None
+    last_access: int | None = None
+    hit_before: bool | None = None
+    key: bytes | None = None
+    opaque: bytes | None = None
     won: bool = False
     busy: bool = False
     stale: bool = False
-    flags: Tuple[bytes, ...] = ()
+    flags: tuple[bytes, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -138,13 +139,13 @@ def parse_meta_result(result: MetaResult) -> MetaCommandResult:
     )
 
 
-def parse_debug_result(result: MetaResult) -> Optional[Dict[str, str]]:
+def parse_debug_result(result: MetaResult) -> dict[str, str] | None:
     """Parse an ``me`` response into its ``name=value`` fields."""
     if result.rc == b"EN":
         return None
     if result.rc != b"ME":
         raise ProtocolError("unexpected debug response %r" % result.rc)
-    fields: Dict[str, str] = {}
+    fields: dict[str, str] = {}
     # The first token is the (possibly base64) key; the rest are name=value.
     for token in result.flags[1:]:
         name, _, value = token.partition(b"=")
@@ -153,10 +154,10 @@ def parse_debug_result(result: MetaResult) -> Optional[Dict[str, str]]:
 
 
 def _assemble_flags(
-    markers: Tuple[Tuple[bool, bytes], ...],
-    tokens: Tuple[Tuple[bytes, Optional[int]], ...],
-    opaque: Optional[Token],
-) -> List[bytes]:
+    markers: tuple[tuple[bool, bytes], ...],
+    tokens: tuple[tuple[bytes, int | None], ...],
+    opaque: Token | None,
+) -> list[bytes]:
     flags = [wire for enabled, wire in markers if enabled]
     flags.extend(
         prefix + b"%d" % value for prefix, value in tokens if value is not None
@@ -194,13 +195,13 @@ def build_get(
     return_hit_before: bool = False,
     return_client_flags: bool = False,
     return_key: bool = False,
-    touch: Optional[int] = None,
-    vivify_ttl: Optional[int] = None,
-    recache_ttl: Optional[int] = None,
-    unless_cas: Optional[int] = None,
-    new_cas: Optional[int] = None,
+    touch: int | None = None,
+    vivify_ttl: int | None = None,
+    recache_ttl: int | None = None,
+    unless_cas: int | None = None,
+    new_cas: int | None = None,
     no_lru_bump: bool = False,
-    opaque: Optional[Token] = None,
+    opaque: Token | None = None,
 ) -> MetaCommand:
     positive("touch", touch)
     positive("vivify_ttl", vivify_ttl)
@@ -233,22 +234,22 @@ def build_set(
     key: Key,
     value: bytes,
     *,
-    client_flags: Optional[int] = None,
-    ttl: Optional[int] = None,
+    client_flags: int | None = None,
+    ttl: int | None = None,
     mode: str = "set",
-    compare_cas: Optional[int] = None,
-    new_cas: Optional[int] = None,
+    compare_cas: int | None = None,
+    new_cas: int | None = None,
     invalidate: bool = False,
-    vivify_ttl: Optional[int] = None,
+    vivify_ttl: int | None = None,
     return_cas: bool = False,
     return_size: bool = False,
     return_key: bool = False,
-    opaque: Optional[Token] = None,
+    opaque: Token | None = None,
 ) -> MetaCommand:
     if not isinstance(value, bytes):
         raise TypeError("meta set requires bytes; serialize before calling")
     if mode not in _STORE_MODES:
-        raise ValueError("invalid store mode %r" % (mode,))
+        raise ValueError("invalid store mode {!r}".format(mode))
     if vivify_ttl is not None and mode not in ("append", "prepend"):
         raise ValueError("vivify_ttl is only valid for append/prepend")
     if ttl is not None and mode in ("append", "prepend"):
@@ -286,13 +287,13 @@ def build_set(
 def build_delete(
     key: Key,
     *,
-    compare_cas: Optional[int] = None,
-    new_cas: Optional[int] = None,
+    compare_cas: int | None = None,
+    new_cas: int | None = None,
     invalidate: bool = False,
-    ttl: Optional[int] = None,
+    ttl: int | None = None,
     drop_value: bool = False,
     return_key: bool = False,
-    opaque: Optional[Token] = None,
+    opaque: Token | None = None,
 ) -> MetaCommand:
     positive("compare_cas", compare_cas)
     positive("new_cas", new_cas)
@@ -317,18 +318,18 @@ def build_delete(
 def build_arithmetic(
     key: Key,
     *,
-    delta: Optional[int] = None,
+    delta: int | None = None,
     decrement: bool = False,
-    initial: Optional[int] = None,
-    initial_ttl: Optional[int] = None,
-    ttl: Optional[int] = None,
-    compare_cas: Optional[int] = None,
-    new_cas: Optional[int] = None,
+    initial: int | None = None,
+    initial_ttl: int | None = None,
+    ttl: int | None = None,
+    compare_cas: int | None = None,
+    new_cas: int | None = None,
     return_value: bool = True,
     return_ttl: bool = False,
     return_cas: bool = False,
     return_key: bool = False,
-    opaque: Optional[Token] = None,
+    opaque: Token | None = None,
 ) -> MetaCommand:
     positive("delta", delta)
     positive("initial", initial)

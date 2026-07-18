@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any
 
 from .result import Key, Meta
 
@@ -11,36 +10,32 @@ from .result import Key, Meta
 class Get:
     key: Key
     meta: Meta = Meta.NONE
-    touch: Optional[int] = None
+    touch: int | None = None
     no_lru_bump: bool = False
-    unless_cas: Optional[int] = None
+    unless_cas: int | None = None
     value: bool = True
-    lease_ttl: Optional[int] = None
-    refresh_before: Optional[int] = None
+    lease_ttl: int | None = None
+    refresh_before: int | None = None
 
 
 @dataclass(frozen=True)
 class Set:
     key: Key
-    if sys.version_info < (3, 9):
-        # Python 3.8's mypy rejects Any in dataclass-generated methods.
-        value: object
-    else:
-        value: Any
-    ttl: Optional[int] = None
+    value: Any
+    ttl: int | None = None
     mode: str = "set"
-    compare_cas: Optional[int] = None
-    version: Optional[int] = None
+    compare_cas: int | None = None
+    version: int | None = None
     return_cas: bool = False
-    vivify_ttl: Optional[int] = None
+    vivify_ttl: int | None = None
 
 
 @dataclass(frozen=True)
 class Delete:
     key: Key
-    compare_cas: Optional[int] = None
+    compare_cas: int | None = None
     invalidate: bool = False
-    stale_for: Optional[int] = None
+    stale_for: int | None = None
 
 
 @dataclass(frozen=True)
@@ -48,13 +43,13 @@ class Arithmetic:
     key: Key
     delta: int = 1
     decrement: bool = False
-    initial: Optional[int] = None
-    initial_ttl: Optional[int] = None
-    ttl: Optional[int] = None
-    compare_cas: Optional[int] = None
-    version: Optional[int] = None
+    initial: int | None = None
+    initial_ttl: int | None = None
+    ttl: int | None = None
+    compare_cas: int | None = None
+    version: int | None = None
     return_cas: bool = False
     return_ttl: bool = False
 
 
-Operation = Union[Get, Set, Delete, Arithmetic]
+Operation = Get | Set | Delete | Arithmetic

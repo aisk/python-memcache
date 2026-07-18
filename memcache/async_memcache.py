@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
+from typing import Any
+from collections.abc import AsyncIterator
 
 from .async_connection import AsyncConnection, AsyncPool  # noqa: F401 re-export
 from .connection import Addr
@@ -42,14 +43,14 @@ class AsyncMemcache:
 
     def __init__(
         self,
-        addr: Union[Addr, List[Addr], None] = None,
+        addr: Addr | list[Addr] | None = None,
         *,
-        pool_size: Optional[int] = 23,
-        pool_timeout: Optional[int] = 1,
+        pool_size: int | None = 23,
+        pool_timeout: int | None = 1,
         load_func: LoadFunc = load,
         dump_func: DumpFunc = dump,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
+        username: str | None = None,
+        password: str | None = None,
     ):
         self._meta = AsyncMetaClient(
             addr,
@@ -71,9 +72,7 @@ class AsyncMemcache:
         await self._meta.close()
 
     @asynccontextmanager
-    async def _get_connection(
-        self, key: Union[str, bytes]
-    ) -> AsyncIterator[AsyncConnection]:
+    async def _get_connection(self, key: str | bytes) -> AsyncIterator[AsyncConnection]:
         async with self._meta._get_connection(key) as conn:
             yield conn
 
@@ -84,15 +83,15 @@ class AsyncMemcache:
         await self._meta.flush_all()
 
     async def set(
-        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
+        self, key: bytes | str, value: Any, *, expire: int | None = None
     ) -> None:
         await self._meta.set(key, value, ttl=expire)
 
-    async def get(self, key: Union[bytes, str]) -> Optional[Any]:
+    async def get(self, key: bytes | str) -> Any | None:
         r = await self._meta.get(key)
         return r.value if r.status is GetStatus.HIT else None
 
-    async def gets(self, key: Union[bytes, str]) -> Optional[Tuple[Any, int]]:
+    async def gets(self, key: bytes | str) -> tuple[Any, int] | None:
         """
         Get a value and its CAS token from memcached.
 
@@ -108,11 +107,11 @@ class AsyncMemcache:
 
     async def cas(
         self,
-        key: Union[bytes, str],
+        key: bytes | str,
         value: Any,
         cas_token: int,
         *,
-        expire: Optional[int] = None,
+        expire: int | None = None,
     ) -> None:
         """
         Store a value using compare-and-swap operation.
@@ -127,32 +126,32 @@ class AsyncMemcache:
         if result.status is not MutationStatus.STORED:
             raise MemcacheError("CAS operation failed: token mismatch or other error")
 
-    async def delete(self, key: Union[bytes, str]) -> bool:
+    async def delete(self, key: bytes | str) -> bool:
         return (await self._meta.delete(key)).status is MutationStatus.STORED
 
-    async def touch(self, key: Union[bytes, str], expire: int) -> bool:
+    async def touch(self, key: bytes | str, expire: int) -> bool:
         return (await self._meta.touch(key, expire)).status is MutationStatus.STORED
 
     async def add(
-        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
+        self, key: bytes | str, value: Any, *, expire: int | None = None
     ) -> bool:
         return (
             await self._meta.add(key, value, ttl=expire)
         ).status is MutationStatus.STORED
 
     async def replace(
-        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
+        self, key: bytes | str, value: Any, *, expire: int | None = None
     ) -> bool:
         result = await self._meta.set(key, value, ttl=expire, mode="replace")
         return result.status is MutationStatus.STORED
 
-    async def append(self, key: Union[bytes, str], value: Any) -> bool:
+    async def append(self, key: bytes | str, value: Any) -> bool:
         return (await self._meta.append(key, value)).status is MutationStatus.STORED
 
-    async def prepend(self, key: Union[bytes, str], value: Any) -> bool:
+    async def prepend(self, key: bytes | str, value: Any) -> bool:
         return (await self._meta.prepend(key, value)).status is MutationStatus.STORED
 
-    async def get_many(self, keys: List[Union[bytes, str]]) -> Dict[str, Any]:
+    async def get_many(self, keys: list[bytes | str]) -> dict[str, Any]:
         results = await self._meta.batch([Get(key) for key in keys])
         return {
             r.key if isinstance(r.key, str) else r.key.decode("latin-1"): r.value
@@ -160,13 +159,13 @@ class AsyncMemcache:
             if r.status is GetStatus.HIT
         }
 
-    async def incr(self, key: Union[bytes, str], value: int = 1) -> int:
+    async def incr(self, key: bytes | str, value: int = 1) -> int:
         result = await self._meta.increment(key, value)
         if result.status is not MutationStatus.STORED or result.value is None:
             raise MemcacheError("key not found")
         return result.value
 
-    async def decr(self, key: Union[bytes, str], value: int = 1) -> int:
+    async def decr(self, key: bytes | str, value: int = 1) -> int:
         result = await self._meta.decrement(key, value)
         if result.status is not MutationStatus.STORED or result.value is None:
             raise MemcacheError("key not found")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .meta_command import MetaResult
@@ -17,7 +17,7 @@ class SerializeError(MemcacheError):
 class AmbiguousWriteError(MemcacheError):
     """A request was sent but its terminal response was not received."""
 
-    def __init__(self, result: Optional[Any] = None) -> None:
+    def __init__(self, result: Any | None = None) -> None:
         super().__init__("operation outcome is ambiguous")
         self.result = result
 
@@ -32,7 +32,7 @@ class PipelineError(MemcacheError):
     def __init__(
         self,
         written: int,
-        responses: List[MetaResult],
+        responses: list[MetaResult],
         cause: BaseException,
     ) -> None:
         super().__init__(str(cause))

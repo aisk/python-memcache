@@ -1,5 +1,6 @@
 import pickle
-from typing import Any, Callable, Tuple, Union
+from typing import Any
+from collections.abc import Callable
 
 from .errors import SerializeError
 
@@ -10,10 +11,10 @@ FLAG_INT = 1 << 1
 FLAG_STR = 1 << 4
 
 
-DumpFunc = Callable[[Union[str, bytes], Any], Tuple[bytes, int]]
+DumpFunc = Callable[[str | bytes, Any], tuple[bytes, int]]
 
 
-def dump(key: Union[str, bytes], value: Any) -> Tuple[bytes, int]:
+def dump(key: str | bytes, value: Any) -> tuple[bytes, int]:
     if isinstance(value, bytes):
         return value, FLAG_BYTES
     elif isinstance(value, int):
@@ -23,10 +24,10 @@ def dump(key: Union[str, bytes], value: Any) -> Tuple[bytes, int]:
     return pickle.dumps(value), FLAG_PICKLE
 
 
-LoadFunc = Callable[[Union[str, bytes], bytes, int], Any]
+LoadFunc = Callable[[str | bytes, bytes, int], Any]
 
 
-def load(key: Union[str, bytes], value: bytes, flags: int) -> Any:
+def load(key: str | bytes, value: bytes, flags: int) -> Any:
     if flags == FLAG_BYTES:
         return value
     elif flags == FLAG_INT:

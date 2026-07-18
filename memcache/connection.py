@@ -2,7 +2,7 @@ import queue
 import socket
 import threading
 from contextlib import contextmanager
-from typing import Callable, Iterator, List, Optional, Tuple
+from collections.abc import Callable, Iterator
 
 from .errors import MemcacheError, PipelineError
 from .meta_command import MetaCommand, MetaResult
@@ -10,7 +10,7 @@ from .meta_command import MetaCommand, MetaResult
 
 NEWLINE = b"\r\n"
 
-Addr = Tuple[str, int]
+Addr = tuple[str, int]
 
 
 class Connection:
@@ -18,16 +18,16 @@ class Connection:
         self,
         addr: Addr,
         *,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        timeout: Optional[float] = None,
+        username: str | None = None,
+        password: str | None = None,
+        timeout: float | None = None,
     ):
         self._addr = addr
         self._username = username
         self._password = password
         self._connect(timeout)
 
-    def _connect(self, timeout: Optional[float]) -> None:
+    def _connect(self, timeout: float | None) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.settimeout(timeout)
         try:
@@ -38,7 +38,7 @@ class Connection:
             self.socket.close()
             raise
 
-    def _set_timeout(self, timeout: Optional[float]) -> None:
+    def _set_timeout(self, timeout: float | None) -> None:
         self.socket.settimeout(timeout)
 
     def _auth(self) -> None:
@@ -61,7 +61,7 @@ class Connection:
         finally:
             self.socket.close()
 
-    def flush_all(self, delay: int = 0, timeout: Optional[float] = None) -> None:
+    def flush_all(self, delay: int = 0, timeout: float | None = None) -> None:
         self._set_timeout(timeout)
         if delay > 0:
             self.socket.sendall(b"flush_all %d\r\n" % delay)
@@ -72,7 +72,7 @@ class Connection:
             raise MemcacheError(response.rstrip(NEWLINE))
 
     def execute_meta_command(
-        self, command: MetaCommand, timeout: Optional[float] = None
+        self, command: MetaCommand, timeout: float | None = None
     ) -> MetaResult:
         # Never reconnect and replay here. Once a write has started, a lost
         # response makes the outcome ambiguous (especially for ms/ma).
@@ -98,12 +98,12 @@ class Connection:
         return result
 
     def execute_pipeline(
-        self, commands: List[MetaCommand], timeout: Optional[float] = None
-    ) -> List[MetaResult]:
+        self, commands: list[MetaCommand], timeout: float | None = None
+    ) -> list[MetaResult]:
         """Write a quiet pipeline and read through its ``mn`` barrier."""
         self._set_timeout(timeout)
         written = 0
-        responses: List[MetaResult] = []
+        responses: list[MetaResult] = []
         try:
             for command in commands:
                 written += 1
@@ -130,8 +130,8 @@ class Pool:
     def __init__(
         self,
         create_connection: Callable[..., Connection],
-        max_size: Optional[int],
-        timeout: Optional[int],
+        max_size: int | None,
+        timeout: int | None,
     ) -> None:
         self._create_connection = create_connection
         self._max_size = max_size

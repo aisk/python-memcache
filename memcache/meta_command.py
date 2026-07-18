@@ -1,6 +1,5 @@
 import base64
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
 
 from .errors import MemcacheError
 
@@ -20,7 +19,7 @@ def _is_legacy_safe(key: bytes) -> bool:
     return True
 
 
-def encode_key(key: bytes) -> Tuple[bytes, bool]:
+def encode_key(key: bytes) -> tuple[bytes, bool]:
     """Return ``(wire_key, needs_base64_flag)`` for a raw key.
 
     Raises :class:`MemcacheError` if the wire key exceeds memcached's limit.
@@ -41,17 +40,17 @@ def encode_key(key: bytes) -> Tuple[bytes, bool]:
 class MetaCommand:
     cm: bytes
     key: bytes
-    datalen: Optional[int]
-    flags: List[bytes]
-    value: Optional[bytes]
+    datalen: int | None
+    flags: list[bytes]
+    value: bytes | None
 
     def __init__(
         self,
         cm: bytes,
-        key: Union[bytes, str],
-        datalen: Optional[int] = None,
-        flags: Optional[List[bytes]] = None,
-        value: Optional[bytes] = None,
+        key: bytes | str,
+        datalen: int | None = None,
+        flags: list[bytes] | None = None,
+        value: bytes | None = None,
     ) -> None:
         if isinstance(key, str):
             key = key.encode()
@@ -83,9 +82,9 @@ class MetaCommand:
 @dataclass
 class MetaResult:
     rc: bytes
-    datalen: Optional[int]
-    flags: List[bytes]
-    value: Optional[bytes]
+    datalen: int | None
+    flags: list[bytes]
+    value: bytes | None
 
     @staticmethod
     def load_header(line: bytes) -> "MetaResult":
@@ -94,10 +93,7 @@ class MetaResult:
         rc = parts[0]
         if rc in (b"CLIENT_ERROR", b"SERVER_ERROR"):
             # Old ascii protocol error.
-            prefix = rc + b" "
-            # Use ``line.removeprefix(prefix)`` when dropping Python 3.8 support.
-            if line.startswith(prefix):
-                line = line[len(prefix) :]  # noqa: E203
+            line = line.removeprefix(rc + b" ")
             raise MemcacheError(line.rstrip().decode("utf-8"))
 
         flags = []

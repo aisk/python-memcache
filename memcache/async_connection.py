@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Callable, List, Optional, Tuple
+from collections.abc import AsyncIterator, Callable
 
 import anyio
 from anyio.streams.buffered import BufferedByteReceiveStream
@@ -12,10 +12,10 @@ from .meta_command import MetaCommand, MetaResult
 class AsyncConnection:
     def __init__(
         self,
-        addr: Tuple[str, int],
+        addr: tuple[str, int],
         *,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
+        username: str | None = None,
+        password: str | None = None,
     ):
         self._addr = addr
         self._username = username
@@ -76,7 +76,7 @@ class AsyncConnection:
             await self.writer.send(command.value + b"\r\n")
         return await self._receive_meta_result()
 
-    async def execute_pipeline(self, commands: List[MetaCommand]) -> List[MetaResult]:
+    async def execute_pipeline(self, commands: list[MetaCommand]) -> list[MetaResult]:
         """Write a quiet pipeline and read through its ``mn`` barrier.
 
         ``PipelineError.written`` is conservative: an operation is counted as
@@ -84,7 +84,7 @@ class AsyncConnection:
         transferred an arbitrary prefix to the kernel.
         """
         written = 0
-        responses: List[MetaResult] = []
+        responses: list[MetaResult] = []
         try:
             if not self._connected:
                 await self._connect()
@@ -124,8 +124,8 @@ class AsyncPool:
     def __init__(
         self,
         create_connection: Callable[..., AsyncConnection],
-        max_size: Optional[int],
-        timeout: Optional[int],
+        max_size: int | None,
+        timeout: int | None,
     ) -> None:
         self._create_connection = create_connection
         self._max_size = max_size

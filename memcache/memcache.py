@@ -1,5 +1,6 @@
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any
+from collections.abc import Iterator
 
 import hashring
 
@@ -43,14 +44,14 @@ class Memcache:
 
     def __init__(
         self,
-        addr: Union[Addr, List[Addr], None] = None,
+        addr: Addr | list[Addr] | None = None,
         *,
-        pool_size: Optional[int] = 23,
-        pool_timeout: Optional[int] = 1,
+        pool_size: int | None = 23,
+        pool_timeout: int | None = 1,
         load_func: LoadFunc = load,
         dump_func: DumpFunc = dump,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
+        username: str | None = None,
+        password: str | None = None,
     ):
         self._meta = MetaClient(
             addr,
@@ -84,7 +85,7 @@ class Memcache:
             pool.close()
 
     @contextmanager
-    def _get_connection(self, key: Union[str, bytes]) -> Iterator[Connection]:
+    def _get_connection(self, key: str | bytes) -> Iterator[Connection]:
         routing_key = key if isinstance(key, str) else key.decode("latin-1")
         pool = self._compat_connections.get_node(routing_key)
         with pool.get() as conn:
@@ -96,16 +97,14 @@ class Memcache:
     def flush_all(self) -> None:
         self._meta.flush_all()
 
-    def set(
-        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
-    ) -> None:
+    def set(self, key: bytes | str, value: Any, *, expire: int | None = None) -> None:
         self._meta.set(key, value, ttl=expire)
 
-    def get(self, key: Union[bytes, str]) -> Optional[Any]:
+    def get(self, key: bytes | str) -> Any | None:
         r = self._meta.get(key)
         return r.value if r.status is GetStatus.HIT else None
 
-    def gets(self, key: Union[bytes, str]) -> Optional[Tuple[Any, int]]:
+    def gets(self, key: bytes | str) -> tuple[Any, int] | None:
         """
         Get a value and its CAS token from memcached.
 
@@ -121,11 +120,11 @@ class Memcache:
 
     def cas(
         self,
-        key: Union[bytes, str],
+        key: bytes | str,
         value: Any,
         cas_token: int,
         *,
-        expire: Optional[int] = None,
+        expire: int | None = None,
     ) -> None:
         """
         Store a value using compare-and-swap operation.
@@ -140,30 +139,28 @@ class Memcache:
         if result.status is not MutationStatus.STORED:
             raise MemcacheError("CAS operation failed: token mismatch or other error")
 
-    def delete(self, key: Union[bytes, str]) -> bool:
+    def delete(self, key: bytes | str) -> bool:
         return self._meta.delete(key).status is MutationStatus.STORED
 
-    def touch(self, key: Union[bytes, str], expire: int) -> bool:
+    def touch(self, key: bytes | str, expire: int) -> bool:
         return self._meta.touch(key, expire).status is MutationStatus.STORED
 
-    def add(
-        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
-    ) -> bool:
+    def add(self, key: bytes | str, value: Any, *, expire: int | None = None) -> bool:
         return self._meta.add(key, value, ttl=expire).status is MutationStatus.STORED
 
     def replace(
-        self, key: Union[bytes, str], value: Any, *, expire: Optional[int] = None
+        self, key: bytes | str, value: Any, *, expire: int | None = None
     ) -> bool:
         result = self._meta.set(key, value, ttl=expire, mode="replace")
         return result.status is MutationStatus.STORED
 
-    def append(self, key: Union[bytes, str], value: Any) -> bool:
+    def append(self, key: bytes | str, value: Any) -> bool:
         return self._meta.append(key, value).status is MutationStatus.STORED
 
-    def prepend(self, key: Union[bytes, str], value: Any) -> bool:
+    def prepend(self, key: bytes | str, value: Any) -> bool:
         return self._meta.prepend(key, value).status is MutationStatus.STORED
 
-    def get_many(self, keys: List[Union[bytes, str]]) -> Dict[str, Any]:
+    def get_many(self, keys: list[bytes | str]) -> dict[str, Any]:
         results = self._meta.batch([Get(key) for key in keys])
         return {
             r.key if isinstance(r.key, str) else r.key.decode("latin-1"): r.value
@@ -171,13 +168,13 @@ class Memcache:
             if r.status is GetStatus.HIT
         }
 
-    def incr(self, key: Union[bytes, str], value: int = 1) -> int:
+    def incr(self, key: bytes | str, value: int = 1) -> int:
         result = self._meta.increment(key, value)
         if result.status is not MutationStatus.STORED or result.value is None:
             raise MemcacheError("key not found")
         return result.value
 
-    def decr(self, key: Union[bytes, str], value: int = 1) -> int:
+    def decr(self, key: bytes | str, value: int = 1) -> int:
         result = self._meta.decrement(key, value)
         if result.status is not MutationStatus.STORED or result.value is None:
             raise MemcacheError("key not found")
