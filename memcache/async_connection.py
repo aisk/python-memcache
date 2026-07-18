@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable
 import anyio
 from anyio.streams.buffered import BufferedByteReceiveStream
 
+from .connection import Addr
 from .errors import MemcacheError, PipelineError as PipelineError
 from .meta_command import MetaCommand, MetaResult
 
@@ -12,7 +13,7 @@ from .meta_command import MetaCommand, MetaResult
 class AsyncConnection:
     def __init__(
         self,
-        addr: tuple[str, int],
+        addr: Addr,
         *,
         username: str | None = None,
         password: str | None = None,

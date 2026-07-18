@@ -2,6 +2,7 @@ import queue
 import socket
 import threading
 from contextlib import contextmanager
+from typing import TypeAlias
 from collections.abc import Callable, Iterator
 
 from .errors import MemcacheError, PipelineError
@@ -10,7 +11,7 @@ from .meta_command import MetaCommand, MetaResult
 
 NEWLINE = b"\r\n"
 
-Addr = tuple[str, int]
+Addr: TypeAlias = tuple[str, int]
 
 
 class Connection:
