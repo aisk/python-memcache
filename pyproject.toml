@@ -5,7 +5,11 @@ description = "Memcached client for Python"
 authors = [{ name = "AN Long", email = "aisk1988@gmail.com" }]
 requires-python = ">=3.10"
 readme = "README.md"
-dependencies = ["hashring>=1.5.1,<2", "anyio>=3.0.0,<4.0.0"]
+dependencies = [
+    "hashring>=1.5.1,<2",
+    "anyio>=3.0.0,<4.0.0",
+    "backports.zstd>=1.0.0 ; python_version < '3.14'",
+]
 
 [dependency-groups]
 dev = [

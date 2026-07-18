@@ -7,6 +7,7 @@ from memcache.experiment import (
     AmbiguousWriteError,
     Arithmetic,
     ArithmeticResult,
+    CompressedSerializer,
     Delete,
     Get,
     GetStatus,
@@ -22,6 +23,7 @@ from memcache.experiment import (
     ValueState,
 )
 from memcache.errors import MemcacheError, PipelineError
+from memcache.serialize import FLAG_COMPRESSED
 
 
 @pytest.fixture()
@@ -141,6 +143,25 @@ def test_pickle_serializer_round_trips_objects(pickle_client):
 
     pickle_client.set("flag", True)
     assert pickle_client.get("flag").value is True
+
+
+def test_compressed_serializer_round_trips_over_the_wire():
+    serializer = CompressedSerializer(PickleSerializer(), min_size=64)
+    with MetaClient(("localhost", 11211), serializer=serializer) as client:
+        value = {"body": "x" * 500}
+        client.set("zipped", value)
+        assert client.get("zipped").value == value
+
+        wire = client.meta.get("zipped", return_client_flags=True)
+        assert wire.client_flags is not None
+        assert wire.client_flags & FLAG_COMPRESSED
+        assert wire.value is not None and len(wire.value) < 500
+
+        client.set("tiny", "small")
+        assert client.get("tiny").value == "small"
+        wire = client.meta.get("tiny", return_client_flags=True)
+        assert wire.client_flags is not None
+        assert not wire.client_flags & FLAG_COMPRESSED
 
 
 def test_json_serializer_round_trips_objects():

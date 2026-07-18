@@ -1,5 +1,6 @@
 from ..errors import AmbiguousWriteError, ProtocolError, SerializeError
 from ..serialize import (
+    CompressedSerializer,
     JsonSerializer,
     PickleSerializer,
     Serializer,
@@ -30,6 +31,7 @@ __all__ = [
     "ArithmeticResult",
     "AsyncMetaClient",
     "BatchResult",
+    "CompressedSerializer",
     "Delete",
     "Get",
     "GetResult",

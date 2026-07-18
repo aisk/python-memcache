@@ -1,5 +1,10 @@
+import bz2
+import gzip
 import json
+import lzma
 import pickle
+import sys
+import zlib
 from typing import Any, Protocol
 from collections.abc import Callable
 
@@ -9,6 +14,7 @@ from .errors import SerializeError
 FLAG_BYTES = 0
 FLAG_PICKLE = 1 << 0
 FLAG_INT = 1 << 1
+FLAG_COMPRESSED = 1 << 3
 FLAG_STR = 1 << 4
 FLAG_JSON = 1 << 5
 
@@ -112,6 +118,90 @@ class JsonSerializer(BaseSerializer):
         if flags == FLAG_JSON:
             return json.loads(value)
         raise SerializeError(f"Unrecognized flags: {flags}")
+
+
+if sys.version_info >= (3, 14):  # stdlib zstd arrived in Python 3.14
+    from compression import zstd
+else:
+    from backports import zstd
+
+# Formats with an unambiguous leading magic, tried in order before the
+# weaker zlib header heuristic below.
+_SNIFF_TABLE: list[tuple[bytes, Callable[[bytes], bytes]]] = [
+    (b"\x28\xb5\x2f\xfd", zstd.decompress),
+    (b"\x1f\x8b", gzip.decompress),
+    (b"BZh", bz2.decompress),
+    (b"\xfd7zXZ\x00", lzma.decompress),
+]
+
+
+def _decompress(key: str | bytes, data: bytes) -> bytes:
+    for magic, decompress in _SNIFF_TABLE:
+        if data.startswith(magic):
+            try:
+                return decompress(data)
+            except Exception as exc:
+                raise SerializeError(
+                    "key %r holds corrupt compressed data" % (key,)
+                ) from exc
+    # zlib has no magic; its 2-byte header satisfies these constraints, and
+    # a false positive still fails the adler32 check inside decompress.
+    if len(data) >= 2 and data[0] & 0x0F == 8 and ((data[0] << 8) | data[1]) % 31 == 0:
+        try:
+            return zlib.decompress(data)
+        except zlib.error as exc:
+            raise SerializeError(
+                "key %r holds corrupt compressed data" % (key,)
+            ) from exc
+    raise SerializeError(
+        "key %r is flagged compressed but has no recognizable "
+        "compression header" % (key,)
+    )
+
+
+class CompressedSerializer:
+    """Wraps another serializer, compressing large payloads with zstd.
+
+    zstd dominates the cache-hot-path tradeoff: better ratio than zlib at
+    a fraction of the CPU, with decompression speed where a read-heavy
+    cache spends its time (stdlib on 3.14+, ``backports.zstd`` before).
+    Reads sniff the payload header instead of trusting a codec label, so
+    zstd, zlib, gzip, bz2, and lzma/xz payloads are all readable
+    regardless of which client or library version wrote them.
+
+    ``FLAG_COMPRESSED`` is set only when compression actually shrank the
+    payload; incompressible values are stored as-is. ``FLAG_INT`` values
+    are never compressed because the server-side arithmetic commands parse
+    the stored bytes directly.
+    """
+
+    def __init__(
+        self,
+        serializer: Serializer,
+        *,
+        min_size: int = 1024,
+        level: int | None = None,
+    ) -> None:
+        if min_size < 1:
+            raise ValueError("min_size must be a positive integer")
+        self._serializer = serializer
+        self._min_size = min_size
+        self._level = level
+
+    def dump(self, key: str | bytes, value: Any) -> tuple[bytes, int]:
+        raw, flags = self._serializer.dump(key, value)
+        if flags == FLAG_INT or len(raw) < self._min_size:
+            return raw, flags
+        packed = zstd.compress(raw, self._level)
+        if len(packed) >= len(raw):
+            return raw, flags
+        return packed, flags | FLAG_COMPRESSED
+
+    def load(self, key: str | bytes, value: bytes, flags: int) -> Any:
+        if flags & FLAG_COMPRESSED:
+            value = _decompress(key, value)
+            flags &= ~FLAG_COMPRESSED
+        return self._serializer.load(key, value, flags)
 
 
 DumpFunc = Callable[[str | bytes, Any], tuple[bytes, int]]
