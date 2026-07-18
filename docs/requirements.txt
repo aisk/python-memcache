@@ -1,2 +1,2 @@
+sphinx
 furo
-hashring>=1.5.1,<2
