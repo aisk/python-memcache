@@ -7,7 +7,6 @@ from collections.abc import Callable, Iterator, Sequence
 
 from ..errors import MemcacheError
 
-
 T = TypeVar("T")
 Key = str | bytes
 _NO_VALUE = object()

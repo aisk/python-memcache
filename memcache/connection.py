@@ -4,7 +4,6 @@ from typing import TypeAlias
 from .errors import MemcacheError, PipelineError
 from .meta_command import MetaCommand, MetaResult
 
-
 NEWLINE = b"\r\n"
 
 Addr: TypeAlias = tuple[str, int]

@@ -10,7 +10,6 @@ from collections.abc import Callable
 
 from .errors import SerializeError
 
-
 FLAG_BYTES = 0
 FLAG_PICKLE = 1 << 0
 FLAG_INT = 1 << 1
