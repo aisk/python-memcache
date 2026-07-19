@@ -108,10 +108,10 @@ def test_close_is_idempotent_and_rejects_new_work():
 def test_batch_marks_written_side_effects_ambiguous(monkeypatch):
     client = MetaClient(("localhost", 11211))
 
-    def fail(commands, timeout):
+    def fail(commands, deadline):
         raise PipelineError(2, [], ConnectionResetError("lost"))
 
-    monkeypatch.setattr(client._servers[0], "pipeline", fail)
+    monkeypatch.setattr(client._servers[0], "start_pipeline", fail)
     results = client.batch([Set("a", "v"), Get("b"), Set("c", "v")])
     assert results[0].status is MutationStatus.AMBIGUOUS
     assert results[1].status is GetStatus.FAILED
@@ -136,7 +136,9 @@ def test_server_failure_is_isolated_in_batch():
             break
     assert good is not None and bad is not None
 
+    before = {thread.ident for thread in threading.enumerate()}
     results = client.batch([Set(good, "ok"), Set(bad, "no"), Get(good)])
+    assert {thread.ident for thread in threading.enumerate()} == before
     assert results[0].status is MutationStatus.STORED
     assert results[1].status is MutationStatus.FAILED
     assert results[2].status is GetStatus.HIT

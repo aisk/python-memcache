@@ -94,18 +94,32 @@ class Connection:
 
         return result
 
-    def execute_pipeline(
+    def send_pipeline(
         self, commands: list[MetaCommand], timeout: float | None = None
-    ) -> list[MetaResult]:
-        """Write a quiet pipeline and read through its ``mn`` barrier."""
+    ) -> None:
+        """Write a quiet pipeline and its ``mn`` barrier without reading."""
         self._set_timeout(timeout)
         written = 0
-        responses: list[MetaResult] = []
         try:
             for command in commands:
                 written += 1
                 self.socket.sendall(command.dump())
             self.socket.sendall(b"mn\r\n")
+        except BaseException as exc:
+            raise PipelineError(written, [], exc)
+
+    def receive_pipeline(
+        self, written: int, timeout: float | None = None
+    ) -> list[MetaResult]:
+        """Read a sent pipeline's responses through its ``mn`` barrier.
+
+        ``written`` is the number of commands already on the wire; it only
+        attributes a failure (``PipelineError.written``), no response count
+        is enforced here because quiet commands suppress their responses.
+        """
+        self._set_timeout(timeout)
+        responses: list[MetaResult] = []
+        try:
             while True:
                 line = self.stream.readline()
                 if not line:
@@ -121,3 +135,10 @@ class Connection:
                 responses.append(result)
         except BaseException as exc:
             raise PipelineError(written, responses, exc)
+
+    def execute_pipeline(
+        self, commands: list[MetaCommand], timeout: float | None = None
+    ) -> list[MetaResult]:
+        """Write a quiet pipeline and read through its ``mn`` barrier."""
+        self.send_pipeline(commands, timeout)
+        return self.receive_pipeline(len(commands), timeout)

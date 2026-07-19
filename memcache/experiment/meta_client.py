@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
+from time import monotonic
 from typing import (
     Any,
-    TypeVar,
     cast,
 )
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 
 import hashring
 
@@ -46,8 +46,17 @@ from .result import (
 )
 
 
-ServerT = TypeVar("ServerT")
-GroupT = TypeVar("GroupT")
+def _deadline(timeout: float | None) -> float | None:
+    return None if timeout is None else monotonic() + timeout
+
+
+def _remaining(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise TimeoutError("batch deadline exceeded")
+    return remaining
 
 
 class _Server:
@@ -88,21 +97,26 @@ class _Server:
             timeout=timeout,
         )
 
-    @contextmanager
-    def _borrow(self, timeout: float | None) -> Iterator[Connection]:
+    def _acquire(self, timeout: float | None) -> Connection:
         with self._lock:
             if self._closed:
                 raise RuntimeError("client is closed")
             connection = self._idle.popleft() if self._idle else None
-        if connection is None:
-            connection = self._new_connection(timeout)
+        return connection if connection is not None else self._new_connection(timeout)
+
+    def _discard(self, connection: Connection) -> None:
+        try:
+            connection.close()
+        except BaseException:
+            pass
+
+    @contextmanager
+    def _borrow(self, timeout: float | None) -> Iterator[Connection]:
+        connection = self._acquire(timeout)
         try:
             yield connection
         except BaseException:
-            try:
-                connection.close()
-            except BaseException:
-                pass
+            self._discard(connection)
             raise
         else:
             self._release(connection)
@@ -114,16 +128,19 @@ class _Server:
             ):
                 self._idle.append(connection)
                 return
-        try:
-            connection.close()
-        except BaseException:
-            pass
+        self._discard(connection)
 
-    def pipeline(
-        self, commands: list[MetaCommand], timeout: float | None
-    ) -> list[MetaResult]:
-        with self._borrow(timeout) as connection:
-            return connection.execute_pipeline(commands, timeout)
+    def start_pipeline(
+        self, commands: list[MetaCommand], deadline: float | None
+    ) -> _InFlight:
+        """Write a full pipeline and return it with its responses unread."""
+        connection = self._acquire(_remaining(deadline))
+        try:
+            connection.send_pipeline(commands, _remaining(deadline))
+        except BaseException:
+            self._discard(connection)
+            raise
+        return _InFlight(self, connection, len(commands))
 
     def execute(self, command: MetaCommand, timeout: float | None) -> MetaResult:
         with self._borrow(timeout) as connection:
@@ -138,10 +155,41 @@ class _Server:
             self._closed = True
             idle, self._idle = list(self._idle), deque()
         for connection in idle:
-            try:
-                connection.close()
-            except BaseException:
-                pass
+            self._discard(connection)
+
+
+class _InFlight:
+    """A pipeline whose commands are written and whose responses are pending."""
+
+    def __init__(self, server: _Server, connection: Connection, count: int) -> None:
+        self._server = server
+        self._connection = connection
+        self.count = count
+
+    def finish(self, deadline: float | None) -> list[MetaResult]:
+        try:
+            responses = self._connection.receive_pipeline(
+                self.count, _remaining(deadline)
+            )
+        except BaseException as exc:
+            self._server._discard(self._connection)
+            if isinstance(exc, PipelineError):
+                raise
+            # The whole pipeline is on the wire, so an expired deadline
+            # here still leaves every side effect ambiguous.
+            raise PipelineError(self.count, [], exc)
+        self._server._release(self._connection)
+        return responses
+
+
+@dataclass
+class _Outcome:
+    """What one server's pipeline produced, successful or not."""
+
+    responses: list[MetaResult]
+    written: int
+    barrier: bool
+    error: BaseException | None
 
 
 class MetaNamespace:
@@ -339,18 +387,21 @@ class MetaNamespace:
             server = self._client._server_for(command.key)
             grouped.setdefault(server, []).append((index, command))
         output: list[MetaResult | None] = [None] * len(commands)
-
-        def run_group(server: _Server, group: list[tuple[int, MetaCommand]]) -> None:
-            responses = server.pipeline(
-                [command for _, command in group],
-                self._client._timeout(timeout),
-            )
-            if len(responses) != len(group):
+        outcomes = self._client._run_pipelines(
+            {
+                server: [command for _, command in group]
+                for server, group in grouped.items()
+            },
+            self._client._timeout(timeout),
+        )
+        for server, group in grouped.items():
+            outcome = outcomes[server]
+            if outcome.error is not None:
+                raise outcome.error
+            if len(outcome.responses) != len(group):
                 raise ProtocolError("meta batch received an unexpected response count")
-            for (index, _), response in zip(group, responses):
+            for (index, _), response in zip(group, outcome.responses):
                 output[index] = response
-
-        self._client._run_parallel(grouped, run_group)
         if any(result is None for result in output):
             raise ProtocolError("meta batch left an operation unresolved")
         return cast(list[MetaResult], output)
@@ -424,45 +475,40 @@ class MetaClient(MetaProtocol):
         return fulfill
 
     @staticmethod
-    def _run_parallel(
-        groups: dict[ServerT, GroupT],
-        function: Callable[[ServerT, GroupT], None],
-    ) -> None:
-        items = list(groups.items())
-        if len(items) <= 1:
-            for server, group in items:
-                function(server, group)
-            return
-        with ThreadPoolExecutor(max_workers=len(items)) as executor:
-            futures = [
-                executor.submit(function, server, group) for server, group in items
-            ]
-            for future in futures:
-                future.result()
+    def _failed_outcome(error: BaseException) -> _Outcome:
+        if isinstance(error, PipelineError):
+            return _Outcome(error.responses, error.written, False, error)
+        return _Outcome([], 0, False, error)
 
-    def _run_group(
+    def _run_pipelines(
         self,
-        server: _Server,
-        prepared: list[Prepared],
-        output: list[Result | None],
+        grouped: dict[_Server, list[MetaCommand]],
         timeout: float | None,
-    ) -> None:
-        commands = [self._pipeline_command(item) for item in prepared]
-        responses: list[MetaResult] = []
-        written = 0
-        failure: BaseException | None = None
-        barrier = False
-        try:
-            responses = server.pipeline(commands, timeout)
-            written = len(prepared)
-            barrier = True
-        except PipelineError as exc:
-            responses = exc.responses
-            written = exc.written
-            failure = exc.cause
-        except BaseException as exc:
-            failure = exc
-        self._resolve_group(prepared, output, responses, written, barrier, failure)
+    ) -> dict[_Server, _Outcome]:
+        """Write every server's pipeline, then read them back one by one.
+
+        The servers process their pipelines concurrently while this thread
+        drains responses sequentially, so the fan-out needs no worker
+        threads and its latency still tracks the slowest server. One server
+        failing never disturbs another; ``timeout`` bounds the whole batch
+        as a single deadline rather than applying per socket operation.
+        """
+        deadline = _deadline(timeout)
+        outcomes: dict[_Server, _Outcome] = {}
+        pending: list[tuple[_Server, _InFlight]] = []
+        for server, commands in grouped.items():
+            try:
+                pending.append((server, server.start_pipeline(commands, deadline)))
+            except BaseException as exc:
+                outcomes[server] = self._failed_outcome(exc)
+        for server, flight in pending:
+            try:
+                responses = flight.finish(deadline)
+            except BaseException as exc:
+                outcomes[server] = self._failed_outcome(exc)
+            else:
+                outcomes[server] = _Outcome(responses, flight.count, True, None)
+        return outcomes
 
     def batch(
         self,
@@ -477,11 +523,25 @@ class MetaClient(MetaProtocol):
         for item in prepared:
             grouped.setdefault(self._server_for(item.operation.key), []).append(item)
         output: list[Result | None] = [None] * len(prepared)
-
-        def run(server: _Server, group: list[Prepared]) -> None:
-            self._run_group(server, group, output, self._timeout(timeout))
-
-        self._run_parallel(grouped, run)
+        outcomes = self._run_pipelines(
+            {
+                server: [self._pipeline_command(item) for item in group]
+                for server, group in grouped.items()
+            },
+            self._timeout(timeout),
+        )
+        for server, group in grouped.items():
+            outcome = outcomes[server]
+            error = outcome.error
+            cause = error.cause if isinstance(error, PipelineError) else error
+            self._resolve_group(
+                group,
+                output,
+                outcome.responses,
+                outcome.written,
+                outcome.barrier,
+                cause,
+            )
         if any(item is None for item in output):
             raise AssertionError("batch executor left an operation unresolved")
         return BatchResult(output)  # type: ignore[arg-type]
@@ -762,12 +822,15 @@ class MetaClient(MetaProtocol):
         if self._closed:
             raise RuntimeError("client is closed")
         positive("delay", delay)
-        groups = {server: None for server in self._servers}
-
-        def flush(server: _Server, unused: None) -> None:
-            server.flush(delay, self.default_timeout)
-
-        self._run_parallel(groups, flush)
+        failure: BaseException | None = None
+        for server in self._servers:
+            try:
+                server.flush(delay, self.default_timeout)
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+        if failure is not None:
+            raise failure
 
 
 __all__ = [
