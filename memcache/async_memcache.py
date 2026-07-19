@@ -1,8 +1,6 @@
-from contextlib import asynccontextmanager
 from typing import Any
-from collections.abc import AsyncIterator
 
-from .async_connection import AsyncConnection, AsyncPool  # noqa: F401 re-export
+from .async_connection import AsyncConnection  # noqa: F401 re-export
 from .connection import Addr
 from .errors import MemcacheError
 from .experiment import Get, Meta
@@ -11,7 +9,7 @@ from .experiment.result import GetStatus, MutationStatus
 from .meta_command import MetaCommand, MetaResult
 from .serialize import dump, load, DumpFunc, FuncSerializer, LoadFunc
 
-__all__ = ["AsyncConnection", "AsyncPool", "AsyncMemcache"]
+__all__ = ["AsyncConnection", "AsyncMemcache"]
 
 
 class AsyncMemcache:
@@ -28,11 +26,10 @@ class AsyncMemcache:
       The address can be a list of tuple, like ``[("192.168.1.10", 11211),
       ("192.168.1.11", 11211)]``. In this situation, the keys will be hashed to one
       of those servers by consistent hash algorithm.
-    :param pool_size: The connection pool size. This size will be used as the max
-      number to keep the connections for future uses.
-    :param pool_timeout: If the there is no available connection in the pool, and the
-      ``pool_size`` is reached, wait the specified time to get an available connection,
-      or a `asyncio.TimeoutError` is raised.
+    :param max_idle: The max number of idle connections to keep per server.
+      Connections are created on demand and returned to the pool after use; a
+      connection returned while the pool already holds ``max_idle`` idle
+      connections is closed instead. Pass None to keep every connection.
     :param load_func: Function to load the bytes content from memcached to python
       values.
     :param dump_func: Function to dump the python values to bytes content to store in
@@ -45,8 +42,7 @@ class AsyncMemcache:
         self,
         addr: Addr | list[Addr] | None = None,
         *,
-        pool_size: int | None = 23,
-        pool_timeout: int | None = 1,
+        max_idle: int | None = 23,
         load_func: LoadFunc = load,
         dump_func: DumpFunc = dump,
         username: str | None = None,
@@ -54,8 +50,7 @@ class AsyncMemcache:
     ):
         self._meta = AsyncMetaClient(
             addr,
-            pool_size=pool_size,
-            pool_timeout=pool_timeout,
+            max_idle=max_idle,
             serializer=FuncSerializer(dump_func, load_func),
             username=username,
             password=password,
@@ -69,11 +64,6 @@ class AsyncMemcache:
 
     async def close(self) -> None:
         await self._meta.close()
-
-    @asynccontextmanager
-    async def _get_connection(self, key: str | bytes) -> AsyncIterator[AsyncConnection]:
-        async with self._meta._get_connection(key) as conn:
-            yield conn
 
     async def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         return await self._meta.execute_meta_command(command)

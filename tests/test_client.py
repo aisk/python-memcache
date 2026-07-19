@@ -1,4 +1,3 @@
-import queue
 import time
 
 import pytest
@@ -54,20 +53,6 @@ def test_delete_returns_bool(client):
 def test_flush_all(client):
     client.flush_all()
     client.flush_all()
-
-
-def test_pool_timeout():
-    client = memcache.Memcache(pool_size=1, pool_timeout=1)
-
-    start = time.time()
-    with client._get_connection("test"):
-        try:
-            with client._get_connection("test"):
-                pass
-        except queue.Empty:
-            assert time.time() - start > 1
-        else:
-            raise ValueError("empty not raised")
 
 
 def test_gets(client):

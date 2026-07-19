@@ -1,9 +1,5 @@
-import queue
 import socket
-import threading
-from contextlib import contextmanager
 from typing import TypeAlias
-from collections.abc import Callable, Iterator
 
 from .errors import MemcacheError, PipelineError
 from .meta_command import MetaCommand, MetaResult
@@ -125,55 +121,3 @@ class Connection:
                 responses.append(result)
         except BaseException as exc:
             raise PipelineError(written, responses, exc)
-
-
-class Pool:
-    def __init__(
-        self,
-        create_connection: Callable[..., Connection],
-        max_size: int | None,
-        timeout: int | None,
-    ) -> None:
-        self._create_connection = create_connection
-        self._max_size = max_size
-        self._timeout = timeout
-        self._size = 0
-        self._lock = threading.Lock()
-        self._connections: queue.Queue[Connection] = queue.Queue()
-
-    @contextmanager
-    def get(self) -> Iterator[Connection]:
-        try:
-            connection = self._connections.get_nowait()
-        except queue.Empty:
-            if self._max_size and self._size >= self._max_size:
-                connection = self._connections.get(timeout=self._timeout)
-            else:
-                with self._lock:
-                    self._size += 1
-                try:
-                    connection = self._create_connection()
-                except BaseException:
-                    with self._lock:
-                        self._size -= 1
-                    raise
-        try:
-            yield connection
-        except BaseException:
-            try:
-                connection.close()
-            finally:
-                with self._lock:
-                    self._size -= 1
-            raise
-        else:
-            self._connections.put(connection)
-
-    def close(self) -> None:
-        while True:
-            try:
-                connection = self._connections.get_nowait()
-            except queue.Empty:
-                break
-            connection.close()
-        self._size = 0

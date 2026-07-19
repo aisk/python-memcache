@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -10,7 +11,7 @@ from collections.abc import AsyncIterator, Sequence
 import anyio
 import hashring
 
-from ..async_connection import AsyncConnection, AsyncPool
+from ..async_connection import AsyncConnection
 from ..connection import Addr
 from ..errors import AmbiguousWriteError, PipelineError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
@@ -45,93 +46,90 @@ from .result import (
 
 
 class _Server:
+    """A memcached backend with an elastic FIFO pool of idle connections.
+
+    Async counterpart of :class:`memcache.experiment.meta_client._Server`;
+    see that class for the pooling contract. Pool bookkeeping happens
+    between awaits within a single event loop, so no lock is needed.
+    """
+
     def __init__(
         self,
         addr: Addr,
         username: str | None,
         password: str | None,
+        max_idle: int | None,
     ) -> None:
         self.addr = addr
         self._username = username
         self._password = password
-        self._connection: AsyncConnection | None = None
-        self._lock = anyio.Lock()
+        self._max_idle = max_idle
+        self._idle: deque[AsyncConnection] = deque()
         self._closed = False
 
     def __repr__(self) -> str:
         return "%s:%d" % self.addr
 
+    @asynccontextmanager
+    async def _borrow(self) -> AsyncIterator[AsyncConnection]:
+        if self._closed:
+            raise RuntimeError("client is closed")
+        if self._idle:
+            connection = self._idle.popleft()
+        else:
+            connection = AsyncConnection(
+                self.addr, username=self._username, password=self._password
+            )
+        try:
+            yield connection
+        except BaseException:
+            try:
+                await connection.close()
+            except BaseException:
+                pass
+            raise
+        else:
+            await self._release(connection)
+
+    async def _release(self, connection: AsyncConnection) -> None:
+        if not self._closed and (
+            self._max_idle is None or len(self._idle) < self._max_idle
+        ):
+            self._idle.append(connection)
+            return
+        try:
+            await connection.close()
+        except BaseException:
+            pass
+
     async def pipeline(
         self, commands: list[MetaCommand], timeout: float | None
     ) -> list[MetaResult]:
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("client is closed")
-            if self._connection is None:
-                self._connection = AsyncConnection(
-                    self.addr, username=self._username, password=self._password
-                )
-            try:
-                if timeout is None:
-                    return await self._connection.execute_pipeline(commands)
-                with anyio.fail_after(timeout):
-                    return await self._connection.execute_pipeline(commands)
-            except BaseException:
-                connection, self._connection = self._connection, None
-                if connection is not None:
-                    try:
-                        await connection.close()
-                    except BaseException:
-                        pass
-                raise
+        async with self._borrow() as connection:
+            if timeout is None:
+                return await connection.execute_pipeline(commands)
+            with anyio.fail_after(timeout):
+                return await connection.execute_pipeline(commands)
 
     async def execute(self, command: MetaCommand, timeout: float | None) -> MetaResult:
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("client is closed")
-            if self._connection is None:
-                self._connection = AsyncConnection(
-                    self.addr, username=self._username, password=self._password
-                )
-            try:
-                if timeout is None:
-                    return await self._connection.execute_meta_command(command)
-                with anyio.fail_after(timeout):
-                    return await self._connection.execute_meta_command(command)
-            except BaseException:
-                connection, self._connection = self._connection, None
-                if connection is not None:
-                    try:
-                        await connection.close()
-                    except BaseException:
-                        pass
-                raise
+        async with self._borrow() as connection:
+            if timeout is None:
+                return await connection.execute_meta_command(command)
+            with anyio.fail_after(timeout):
+                return await connection.execute_meta_command(command)
 
     async def flush(self, delay: int) -> None:
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("client is closed")
-            if self._connection is None:
-                self._connection = AsyncConnection(
-                    self.addr, username=self._username, password=self._password
-                )
-            try:
-                await self._connection.flush_all(delay)
-            except BaseException:
-                connection, self._connection = self._connection, None
-                if connection is not None:
-                    try:
-                        await connection.close()
-                    except BaseException:
-                        pass
-                raise
+        async with self._borrow() as connection:
+            await connection.flush_all(delay)
 
     async def close(self) -> None:
-        async with self._lock:
-            self._closed = True
-            connection, self._connection = self._connection, None
-            if connection is not None:
+        self._closed = True
+        while self._idle:
+            connection = self._idle.popleft()
+            try:
                 await connection.close()
+            except BaseException:
+                pass
 
 
 class AsyncMetaNamespace:
@@ -368,8 +366,7 @@ class AsyncMetaClient(MetaProtocol):
         self,
         addr: Addr | list[Addr] | None = None,
         *,
-        pool_size: int | None = 23,
-        pool_timeout: int | None = 1,
+        max_idle: int | None = 23,
         timeout: float | None = 1.0,
         serializer: Serializer | None = None,
         username: str | None = None,
@@ -387,20 +384,10 @@ class AsyncMetaClient(MetaProtocol):
         else:
             raise TypeError("addr must be a server tuple or a non-empty list")
         self._servers = [
-            _Server(server, username=username, password=password)
+            _Server(server, username=username, password=password, max_idle=max_idle)
             for server in addresses
         ]
         self._ring = hashring.HashRing(self._servers)
-        compat_pools = []
-        for server in addresses:
-
-            def make(server: Addr = server) -> AsyncConnection:
-                return AsyncConnection(server, username=username, password=password)
-
-            compat_pools.append(
-                AsyncPool(make, max_size=pool_size, timeout=pool_timeout)
-            )
-        self._compat_ring = hashring.HashRing(compat_pools)
         self.meta = AsyncMetaNamespace(self)
         self._closed = False
 
@@ -417,22 +404,12 @@ class AsyncMetaClient(MetaProtocol):
         routing_key = key if isinstance(key, str) else key.decode("latin-1")
         return cast(_Server, self._ring.get_node(routing_key))
 
-    @asynccontextmanager
-    async def _get_connection(self, key: Key) -> AsyncIterator[AsyncConnection]:
-        """Backward-compatible private pool hook used by AsyncMemcache."""
-        routing_key = key if isinstance(key, str) else key.decode("latin-1")
-        pool = self._compat_ring.get_node(routing_key)
-        async with pool.get() as connection:
-            yield connection
-
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         for server in self._servers:
             await server.close()
-        for pool in self._compat_ring.nodes:
-            await pool.close()
 
     async def execute_meta_command(
         self, command: MetaCommand, *, timeout: float | None = None

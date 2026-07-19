@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import (
@@ -12,7 +13,7 @@ from collections.abc import Callable, Iterator, Sequence
 
 import hashring
 
-from ..connection import Addr, Connection, Pool
+from ..connection import Addr, Connection
 from ..errors import AmbiguousWriteError, PipelineError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
 from ..serialize import Serializer, StrictSerializer
@@ -50,16 +51,29 @@ GroupT = TypeVar("GroupT")
 
 
 class _Server:
+    """A memcached backend with an elastic FIFO pool of idle connections.
+
+    Borrowing takes the oldest idle connection or creates a new one when the
+    pool is empty; callers never block waiting for a connection. A connection
+    is only returned after a fully completed request/response cycle — one
+    that failed mid-cycle may hold unread response bytes, so it is closed
+    instead of poisoning the next borrower. FIFO reuse keeps every pooled
+    connection recently used, so idle-timeout middleboxes cannot silently
+    kill the pool's tail.
+    """
+
     def __init__(
         self,
         addr: Addr,
         username: str | None,
         password: str | None,
+        max_idle: int | None,
     ) -> None:
         self.addr = addr
         self._username = username
         self._password = password
-        self._connection: Connection | None = None
+        self._max_idle = max_idle
+        self._idle: deque[Connection] = deque()
         self._lock = threading.Lock()
         self._closed = False
 
@@ -74,62 +88,60 @@ class _Server:
             timeout=timeout,
         )
 
+    @contextmanager
+    def _borrow(self, timeout: float | None) -> Iterator[Connection]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("client is closed")
+            connection = self._idle.popleft() if self._idle else None
+        if connection is None:
+            connection = self._new_connection(timeout)
+        try:
+            yield connection
+        except BaseException:
+            try:
+                connection.close()
+            except BaseException:
+                pass
+            raise
+        else:
+            self._release(connection)
+
+    def _release(self, connection: Connection) -> None:
+        with self._lock:
+            if not self._closed and (
+                self._max_idle is None or len(self._idle) < self._max_idle
+            ):
+                self._idle.append(connection)
+                return
+        try:
+            connection.close()
+        except BaseException:
+            pass
+
     def pipeline(
         self, commands: list[MetaCommand], timeout: float | None
     ) -> list[MetaResult]:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("client is closed")
-            if self._connection is None:
-                self._connection = self._new_connection(timeout)
-            try:
-                return self._connection.execute_pipeline(commands, timeout)
-            except BaseException:
-                connection, self._connection = self._connection, None
-                try:
-                    connection.close()
-                except BaseException:
-                    pass
-                raise
+        with self._borrow(timeout) as connection:
+            return connection.execute_pipeline(commands, timeout)
 
     def execute(self, command: MetaCommand, timeout: float | None) -> MetaResult:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("client is closed")
-            if self._connection is None:
-                self._connection = self._new_connection(timeout)
-            try:
-                return self._connection.execute_meta_command(command, timeout)
-            except BaseException:
-                connection, self._connection = self._connection, None
-                try:
-                    connection.close()
-                except BaseException:
-                    pass
-                raise
+        with self._borrow(timeout) as connection:
+            return connection.execute_meta_command(command, timeout)
 
     def flush(self, delay: int, timeout: float | None) -> None:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("client is closed")
-            if self._connection is None:
-                self._connection = self._new_connection(timeout)
-            try:
-                self._connection.flush_all(delay, timeout)
-            except BaseException:
-                connection, self._connection = self._connection, None
-                try:
-                    connection.close()
-                except BaseException:
-                    pass
-                raise
+        with self._borrow(timeout) as connection:
+            connection.flush_all(delay, timeout)
 
     def close(self) -> None:
         with self._lock:
             self._closed = True
-            connection, self._connection = self._connection, None
-            if connection is not None:
+            idle, self._idle = list(self._idle), deque()
+        for connection in idle:
+            try:
                 connection.close()
+            except BaseException:
+                pass
 
 
 class MetaNamespace:
@@ -351,8 +363,7 @@ class MetaClient(MetaProtocol):
         self,
         addr: Addr | list[Addr] | None = None,
         *,
-        pool_size: int | None = 23,
-        pool_timeout: int | None = 1,
+        max_idle: int | None = 23,
         timeout: float | None = 1.0,
         serializer: Serializer | None = None,
         username: str | None = None,
@@ -370,18 +381,10 @@ class MetaClient(MetaProtocol):
         else:
             raise TypeError("addr must be a server tuple or a non-empty list")
         self._servers = [
-            _Server(server, username=username, password=password)
+            _Server(server, username=username, password=password, max_idle=max_idle)
             for server in addresses
         ]
         self._ring = hashring.HashRing(self._servers)
-        compat_pools = []
-        for server in addresses:
-
-            def make(server: Addr = server) -> Connection:
-                return Connection(server, username=username, password=password)
-
-            compat_pools.append(Pool(make, max_size=pool_size, timeout=pool_timeout))
-        self._compat_ring = hashring.HashRing(compat_pools)
         self.meta = MetaNamespace(self)
         self._closed = False
 
@@ -398,21 +401,12 @@ class MetaClient(MetaProtocol):
         routing_key = key if isinstance(key, str) else key.decode("latin-1")
         return cast(_Server, self._ring.get_node(routing_key))
 
-    @contextmanager
-    def _get_connection(self, key: Key) -> Iterator[Connection]:
-        routing_key = key if isinstance(key, str) else key.decode("latin-1")
-        pool = self._compat_ring.get_node(routing_key)
-        with pool.get() as connection:
-            yield connection
-
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         for server in self._servers:
             server.close()
-        for pool in self._compat_ring.nodes:
-            pool.close()
 
     def execute_meta_command(
         self, command: MetaCommand, *, timeout: float | None = None

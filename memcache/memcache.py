@@ -1,10 +1,6 @@
-from contextlib import contextmanager
 from typing import Any
-from collections.abc import Iterator
 
-import hashring
-
-from .connection import Addr, Connection, Pool  # re-export for backward compat
+from .connection import Addr, Connection  # re-export for backward compat
 from .errors import MemcacheError
 from .experiment.meta_client import MetaClient
 from .experiment.operation import Get
@@ -12,7 +8,7 @@ from .experiment.result import GetStatus, Meta, MutationStatus
 from .meta_command import MetaCommand, MetaResult
 from .serialize import dump, load, DumpFunc, FuncSerializer, LoadFunc
 
-__all__ = ["Addr", "Connection", "Pool", "Memcache"]
+__all__ = ["Addr", "Connection", "Memcache"]
 
 
 class Memcache:
@@ -29,11 +25,10 @@ class Memcache:
       The address can be a list of tuple, like ``[("192.168.1.10", 11211),
       ("192.168.1.11", 11211)]``. In this situation, the keys will be hashed to one
       of those servers by consistent hash algorithm.
-    :param pool_size: The connection pool size. This size will be used as the max
-      number to keep the connections for future uses.
-    :param pool_timeout: If the there is no available connection in the pool, and the
-      ``pool_size`` is reached, wait the specified time to get an available connection,
-      or a `queue.Empty` is raised.
+    :param max_idle: The max number of idle connections to keep per server.
+      Connections are created on demand and returned to the pool after use; a
+      connection returned while the pool already holds ``max_idle`` idle
+      connections is closed instead. Pass None to keep every connection.
     :param load_func: Function to load the bytes content from memcached to python
       values.
     :param dump_func: Function to dump the python values to bytes content to store in
@@ -46,8 +41,7 @@ class Memcache:
         self,
         addr: Addr | list[Addr] | None = None,
         *,
-        pool_size: int | None = 23,
-        pool_timeout: int | None = 1,
+        max_idle: int | None = 23,
         load_func: LoadFunc = load,
         dump_func: DumpFunc = dump,
         username: str | None = None,
@@ -55,22 +49,11 @@ class Memcache:
     ):
         self._meta = MetaClient(
             addr,
-            pool_size=pool_size,
-            pool_timeout=pool_timeout,
+            max_idle=max_idle,
             serializer=FuncSerializer(dump_func, load_func),
             username=username,
             password=password,
         )
-        compat_addr = addr or ("localhost", 11211)
-        addresses = compat_addr if isinstance(compat_addr, list) else [compat_addr]
-        pools = []
-        for server in addresses:
-
-            def make(server: Addr = server) -> Connection:
-                return Connection(server, username=username, password=password)
-
-            pools.append(Pool(make, max_size=pool_size, timeout=pool_timeout))
-        self._compat_connections = hashring.HashRing(pools)
 
     def __enter__(self) -> "Memcache":
         return self
@@ -80,15 +63,6 @@ class Memcache:
 
     def close(self) -> None:
         self._meta.close()
-        for pool in self._compat_connections.nodes:
-            pool.close()
-
-    @contextmanager
-    def _get_connection(self, key: str | bytes) -> Iterator[Connection]:
-        routing_key = key if isinstance(key, str) else key.decode("latin-1")
-        pool = self._compat_connections.get_node(routing_key)
-        with pool.get() as conn:
-            yield conn
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
         return self._meta.execute_meta_command(command)

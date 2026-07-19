@@ -1,7 +1,3 @@
-import asyncio
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator, Callable
-
 import anyio
 from anyio.streams.buffered import BufferedByteReceiveStream
 
@@ -119,57 +115,3 @@ class AsyncConnection:
             await self.reader.receive_exactly(2)  # read the "\r\n"
 
         return result
-
-
-class AsyncPool:
-    def __init__(
-        self,
-        create_connection: Callable[..., AsyncConnection],
-        max_size: int | None,
-        timeout: int | None,
-    ) -> None:
-        self._create_connection = create_connection
-        self._max_size = max_size
-        self._timeout = timeout
-        self._size = 0
-        self._lock = asyncio.Lock()
-        self._connections: asyncio.Queue[AsyncConnection] = asyncio.Queue()
-
-    @asynccontextmanager
-    async def get(self) -> AsyncIterator[AsyncConnection]:
-        try:
-            connection = self._connections.get_nowait()
-        except asyncio.QueueEmpty:
-            if self._max_size and self._size >= self._max_size:
-                connection = await asyncio.wait_for(
-                    self._connections.get(), timeout=self._timeout
-                )
-            else:
-                async with self._lock:
-                    self._size += 1
-                try:
-                    connection = self._create_connection()
-                except BaseException:
-                    async with self._lock:
-                        self._size -= 1
-                    raise
-        try:
-            yield connection
-        except BaseException:
-            try:
-                await connection.close()
-            finally:
-                async with self._lock:
-                    self._size -= 1
-            raise
-        else:
-            await self._connections.put(connection)
-
-    async def close(self) -> None:
-        while True:
-            try:
-                connection = self._connections.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            await connection.close()
-        self._size = 0

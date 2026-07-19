@@ -30,6 +30,38 @@ async def flush(client):
 
 
 @pytest.mark.asyncio
+async def test_async_pool_grows_on_demand_and_reuses_fifo(client):
+    server = client._servers[0]
+    async with server._borrow() as first:
+        async with server._borrow() as second:
+            assert first is not second
+    assert list(server._idle) == [second, first]
+    async with server._borrow() as third:
+        assert third is second  # oldest idle connection is reused first
+
+
+@pytest.mark.asyncio
+async def test_async_pool_trims_idle_connections_over_max_idle():
+    async with AsyncMetaClient(("localhost", 11211), max_idle=1) as client:
+        server = client._servers[0]
+        async with server._borrow() as first:
+            async with server._borrow() as second:
+                assert first is not second
+        assert list(server._idle) == [second]
+
+
+@pytest.mark.asyncio
+async def test_async_pool_discards_connection_on_failure(client):
+    server = client._servers[0]
+    await client.set("pooled", "v")
+    assert len(server._idle) == 1
+    with pytest.raises(ValueError):
+        async with server._borrow():
+            raise ValueError("boom")
+    assert not server._idle
+
+
+@pytest.mark.asyncio
 async def test_async_api_has_the_same_shape(client):
     stored = await client.set("key", "value 1", ttl=60, return_cas=True)
     assert stored.status is MutationStatus.STORED

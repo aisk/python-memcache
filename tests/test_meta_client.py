@@ -51,6 +51,45 @@ def test_sync_client_has_no_background_event_loop_thread():
         client.close()
 
 
+def test_pool_recycles_connection_across_requests(client):
+    client.set("pooled", "v")
+    server = client._server_for("pooled")
+    assert len(server._idle) == 1
+    connection = server._idle[0]
+    assert client.get("pooled").value == "v"
+    assert len(server._idle) == 1
+    assert server._idle[0] is connection
+
+
+def test_pool_grows_on_demand_and_reuses_fifo(client):
+    server = client._servers[0]
+    with server._borrow(1.0) as first:
+        with server._borrow(1.0) as second:
+            assert first is not second
+    assert list(server._idle) == [second, first]
+    with server._borrow(1.0) as third:
+        assert third is second  # oldest idle connection is reused first
+
+
+def test_pool_trims_idle_connections_over_max_idle():
+    with MetaClient(("localhost", 11211), max_idle=1) as client:
+        server = client._servers[0]
+        with server._borrow(1.0) as first:
+            with server._borrow(1.0) as second:
+                pass
+        assert list(server._idle) == [second]
+        assert first.socket.fileno() == -1  # closed instead of pooled
+
+
+def test_pool_discards_connection_on_failure(client):
+    server = client._servers[0]
+    with pytest.raises(ValueError):
+        with server._borrow(1.0) as connection:
+            raise ValueError("boom")
+    assert not server._idle
+    assert connection.socket.fileno() == -1
+
+
 def test_pipeline_error_is_a_memcache_error():
     error = PipelineError(1, [], ConnectionResetError("lost"))
     assert isinstance(error, MemcacheError)
