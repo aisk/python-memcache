@@ -138,10 +138,14 @@ class Memcache:
         result = self._meta.set(key, value, ttl=expire, mode="replace")
         return result.status is MutationStatus.STORED
 
-    def append(self, key: bytes | str, value: Any) -> bool:
+    def append(self, key: bytes | str, value: bytes | str) -> bool:
+        if isinstance(value, str):
+            value = value.encode()
         return self._meta.append(key, value).status is MutationStatus.STORED
 
-    def prepend(self, key: bytes | str, value: Any) -> bool:
+    def prepend(self, key: bytes | str, value: bytes | str) -> bool:
+        if isinstance(value, str):
+            value = value.encode()
         return self._meta.prepend(key, value).status is MutationStatus.STORED
 
     def get_many(self, keys: list[bytes | str]) -> dict[str, Any]:

@@ -145,10 +145,14 @@ class AsyncMemcache:
         result = await self._meta.set(key, value, ttl=expire, mode="replace")
         return result.status is MutationStatus.STORED
 
-    async def append(self, key: bytes | str, value: Any) -> bool:
+    async def append(self, key: bytes | str, value: bytes | str) -> bool:
+        if isinstance(value, str):
+            value = value.encode()
         return (await self._meta.append(key, value)).status is MutationStatus.STORED
 
-    async def prepend(self, key: bytes | str, value: Any) -> bool:
+    async def prepend(self, key: bytes | str, value: bytes | str) -> bool:
+        if isinstance(value, str):
+            value = value.encode()
         return (await self._meta.prepend(key, value)).status is MutationStatus.STORED
 
     async def get_many(self, keys: list[bytes | str]) -> dict[str, Any]:
