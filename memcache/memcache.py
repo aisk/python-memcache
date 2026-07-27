@@ -29,6 +29,8 @@ class Memcache:
       Connections are created on demand and returned to the pool after use; a
       connection returned while the pool already holds ``max_idle`` idle
       connections is closed instead. Pass None to keep every connection.
+    :param timeout: Timeout in seconds for every operation. Pass None to wait
+      indefinitely.
     :param load_func: Function to load the bytes content from memcached to python
       values.
     :param dump_func: Function to dump the python values to bytes content to store in
@@ -42,6 +44,7 @@ class Memcache:
         addr: Addr | list[Addr] | None = None,
         *,
         max_idle: int | None = 23,
+        timeout: float | None = 1.0,
         load_func: LoadFunc = load,
         dump_func: DumpFunc = dump,
         username: str | None = None,
@@ -50,6 +53,7 @@ class Memcache:
         self._meta = MetaClient(
             addr,
             max_idle=max_idle,
+            timeout=timeout,
             serializer=FuncSerializer(dump_func, load_func),
             username=username,
             password=password,
