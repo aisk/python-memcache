@@ -2,7 +2,7 @@ from typing import Any
 
 from .async_connection import AsyncConnection  # noqa: F401 re-export
 from .connection import Addr
-from .errors import MemcacheError
+from .errors import CasMismatchError, MemcacheError
 from .experiment import Get, Meta
 from .experiment.async_meta_client import AsyncMetaClient
 from .experiment.result import GetStatus, MutationStatus
@@ -113,11 +113,18 @@ class AsyncMemcache:
         :param value: The value to store
         :param cas_token: The CAS token from a previous gets operation
         :param expire: Optional expiration time in seconds
-        :raises MemcacheError: If the CAS token doesn't match or other error occurs
+        :raises CasMismatchError: If the item changed since the CAS token was read
+        :raises MemcacheError: If the key doesn't exist or the operation fails
         """
         result = await self._meta.cas(key, value, cas_token, ttl=expire)
+        if result.status is MutationStatus.CAS_MISMATCH:
+            raise CasMismatchError("CAS token mismatch")
+        if result.status is MutationStatus.NOT_FOUND:
+            raise MemcacheError("key not found")
         if result.status is not MutationStatus.STORED:
-            raise MemcacheError("CAS operation failed: token mismatch or other error")
+            raise MemcacheError(
+                f"CAS operation failed: {result.status.name}"
+            ) from result.error
 
     async def delete(self, key: bytes | str) -> bool:
         return (await self._meta.delete(key)).status is MutationStatus.STORED
@@ -154,12 +161,24 @@ class AsyncMemcache:
 
     async def incr(self, key: bytes | str, value: int = 1) -> int:
         result = await self._meta.increment(key, value)
-        if result.status is not MutationStatus.STORED or result.value is None:
+        if result.status is MutationStatus.NOT_FOUND:
             raise MemcacheError("key not found")
+        if result.status is not MutationStatus.STORED:
+            raise MemcacheError(
+                f"increment failed: {result.status.name}"
+            ) from result.error
+        if result.value is None:
+            raise MemcacheError("no value in increment response")
         return result.value
 
     async def decr(self, key: bytes | str, value: int = 1) -> int:
         result = await self._meta.decrement(key, value)
-        if result.status is not MutationStatus.STORED or result.value is None:
+        if result.status is MutationStatus.NOT_FOUND:
             raise MemcacheError("key not found")
+        if result.status is not MutationStatus.STORED:
+            raise MemcacheError(
+                f"decrement failed: {result.status.name}"
+            ) from result.error
+        if result.value is None:
+            raise MemcacheError("no value in decrement response")
         return result.value

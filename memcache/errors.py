@@ -14,6 +14,10 @@ class SerializeError(MemcacheError):
     pass
 
 
+class CasMismatchError(MemcacheError):
+    """The item changed since it was read; re-read and retry the operation."""
+
+
 class AmbiguousWriteError(MemcacheError):
     """A request was sent but its terminal response was not received."""
 
