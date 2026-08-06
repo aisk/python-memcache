@@ -86,6 +86,11 @@ class MetaResult:
     flags: list[bytes]
     value: bytes | None
 
+    @property
+    def is_barrier(self) -> bool:
+        """Whether this is the ``MN`` reply that ends a quiet pipeline."""
+        return self.rc == b"MN"
+
     @staticmethod
     def load_header(line: bytes) -> "MetaResult":
         parts = line.split()
@@ -107,3 +112,60 @@ class MetaResult:
             else:
                 flags = parts[1:]
         return MetaResult(rc=rc, datalen=datalen, flags=flags, value=None)
+
+
+# A response header is a short line of tokens; memcached never emits one
+# anywhere near this long, so exceeding it means the stream is corrupt.
+MAX_LINE_LENGTH = 1024
+
+
+class ResponseReader:
+    """Sans-IO incremental parser for meta protocol responses.
+
+    Transports feed raw bytes as they arrive off the wire; all framing
+    state (header lines, ``VA`` value payloads, ``MN`` pipeline barriers)
+    lives here so the parsing logic exists exactly once for the sync and
+    async connections. ``next_response``/``next_line`` return ``None``
+    when the buffered bytes do not yet hold a complete item.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+        self._pending: MetaResult | None = None
+
+    def feed(self, data: bytes) -> None:
+        self._buffer += data
+
+    def next_line(self) -> bytes | None:
+        """Take one CRLF-terminated line, without the terminator."""
+        end = self._buffer.find(b"\r\n")
+        if end < 0:
+            if len(self._buffer) > MAX_LINE_LENGTH:
+                raise MemcacheError("response line exceeds maximum length")
+            return None
+        line = bytes(self._buffer[:end])
+        del self._buffer[: end + 2]
+        return line
+
+    def next_response(self) -> MetaResult | None:
+        """Take the next complete response, value payload included."""
+        while True:
+            pending = self._pending
+            if pending is not None:
+                assert pending.datalen is not None
+                # The payload is followed by a CRLF terminator.
+                if len(self._buffer) < pending.datalen + 2:
+                    return None
+                pending.value = bytes(self._buffer[: pending.datalen])
+                del self._buffer[: pending.datalen + 2]
+                self._pending = None
+                return pending
+            line = self.next_line()
+            if line is None:
+                return None
+            result = MetaResult.load_header(line)
+            if result.rc != b"VA":
+                return result
+            if result.datalen is None:
+                raise MemcacheError("invalid response: missing datalen")
+            self._pending = result

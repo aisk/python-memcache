@@ -2,9 +2,10 @@ import socket
 from typing import TypeAlias
 
 from .errors import MemcacheError, PipelineError
-from .meta_command import MetaCommand, MetaResult
+from .meta_command import MetaCommand, MetaResult, ResponseReader
 
 NEWLINE = b"\r\n"
+RECV_SIZE = 65536
 
 Addr: TypeAlias = tuple[str, int]
 
@@ -26,9 +27,9 @@ class Connection:
     def _connect(self, timeout: float | None) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.settimeout(timeout)
+        self._reader = ResponseReader()
         try:
             self.socket.connect(self._addr)
-            self.stream = self.socket.makefile(mode="rb")
             self._auth()
         except BaseException:
             self.socket.close()
@@ -36,6 +37,26 @@ class Connection:
 
     def _set_timeout(self, timeout: float | None) -> None:
         self.socket.settimeout(timeout)
+
+    def _fill(self) -> None:
+        data = self.socket.recv(RECV_SIZE)
+        if not data:
+            raise MemcacheError("connection closed while reading response")
+        self._reader.feed(data)
+
+    def _next_line(self) -> bytes:
+        while True:
+            line = self._reader.next_line()
+            if line is not None:
+                return line
+            self._fill()
+
+    def _next_response(self) -> MetaResult:
+        while True:
+            result = self._reader.next_response()
+            if result is not None:
+                return result
+            self._fill()
 
     def _auth(self) -> None:
         if self._username is None or self._password is None:
@@ -47,15 +68,12 @@ class Connection:
         self.socket.sendall(
             b"set auth x 0 %d\r\n" % len(auth_data) + auth_data + b"\r\n"
         )
-        response = self.stream.readline()
-        if response != b"STORED\r\n":
-            raise MemcacheError(response.rstrip(NEWLINE))
+        response = self._next_line()
+        if response != b"STORED":
+            raise MemcacheError(response)
 
     def close(self) -> None:
-        try:
-            self.stream.close()
-        finally:
-            self.socket.close()
+        self.socket.close()
 
     def flush_all(self, delay: int = 0, timeout: float | None = None) -> None:
         self._set_timeout(timeout)
@@ -63,9 +81,9 @@ class Connection:
             self.socket.sendall(b"flush_all %d\r\n" % delay)
         else:
             self.socket.sendall(b"flush_all\r\n")
-        response = self.stream.readline()
-        if response != b"OK\r\n":
-            raise MemcacheError(response.rstrip(NEWLINE))
+        response = self._next_line()
+        if response != b"OK":
+            raise MemcacheError(response)
 
     def execute_meta_command(
         self, command: MetaCommand, timeout: float | None = None
@@ -73,25 +91,8 @@ class Connection:
         # Never reconnect and replay here. Once a write has started, a lost
         # response makes the outcome ambiguous (especially for ms/ma).
         self._set_timeout(timeout)
-        return self._execute_meta_command(command)
-
-    def _execute_meta_command(self, command: MetaCommand) -> MetaResult:
         self.socket.sendall(command.dump())
-        return self._receive_meta_result()
-
-    def _receive_meta_result(self) -> MetaResult:
-        line = self.stream.readline()
-        if not line:
-            raise MemcacheError("connection closed while reading response")
-        result = MetaResult.load_header(line)
-
-        if result.rc == b"VA":
-            if result.datalen is None:
-                raise MemcacheError("invalid response: missing datalen")
-            result.value = self.stream.read(result.datalen)
-            self.stream.read(2)  # read the "\r\n"
-
-        return result
+        return self._next_response()
 
     def send_pipeline(
         self, commands: list[MetaCommand], timeout: float | None = None
@@ -120,17 +121,9 @@ class Connection:
         responses: list[MetaResult] = []
         try:
             while True:
-                line = self.stream.readline()
-                if not line:
-                    raise MemcacheError("connection closed while reading pipeline")
-                if line == b"MN\r\n":
+                result = self._next_response()
+                if result.is_barrier:
                     return responses
-                result = MetaResult.load_header(line)
-                if result.rc == b"VA":
-                    if result.datalen is None:
-                        raise MemcacheError("invalid response: missing datalen")
-                    result.value = self.stream.read(result.datalen)
-                    self.stream.read(2)
                 responses.append(result)
         except BaseException as exc:
             raise PipelineError(written, responses, exc)
