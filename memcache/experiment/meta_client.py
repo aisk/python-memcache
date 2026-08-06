@@ -14,10 +14,21 @@ from collections.abc import Iterator, Sequence
 import hashring
 
 from ..connection import Addr, Connection
-from ..errors import AmbiguousWriteError, PipelineError, ProtocolError
+from ..errors import PipelineError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
 from ..serialize import Serializer, StrictSerializer
-from ._meta_core import MetaProtocol, Prepared
+from ._meta_core import (
+    MetaProtocol,
+    fill_meta_responses,
+    finalize_batch,
+    finalize_meta_batch,
+    group_meta_commands,
+    group_prepared,
+    normalize_addresses,
+    raise_if_ambiguous,
+    routing_key,
+    touch_result,
+)
 from .meta_api import (
     MetaCommandResult,
     Token,
@@ -36,12 +47,10 @@ from .result import (
     ArithmeticResult,
     BatchResult,
     GetResult,
-    GetStatus,
     Key,
     LeaseResult,
     Meta,
     MutationResult,
-    MutationStatus,
     Result,
 )
 
@@ -380,12 +389,7 @@ class MetaNamespace:
     ) -> list[MetaResult]:
         if self._client._closed:
             raise RuntimeError("client is closed")
-        grouped: dict[_Server, list[tuple[int, MetaCommand]]] = {}
-        for index, command in enumerate(commands):
-            if b"q" in command.flags:
-                raise ValueError("meta batch does not accept quiet commands")
-            server = self._client._server_for(command.key)
-            grouped.setdefault(server, []).append((index, command))
+        grouped = group_meta_commands(commands, self._client._server_for)
         output: list[MetaResult | None] = [None] * len(commands)
         outcomes = self._client._run_pipelines(
             {
@@ -398,13 +402,8 @@ class MetaNamespace:
             outcome = outcomes[server]
             if outcome.error is not None:
                 raise outcome.error
-            if len(outcome.responses) != len(group):
-                raise ProtocolError("meta batch received an unexpected response count")
-            for (index, _), response in zip(group, outcome.responses):
-                output[index] = response
-        if any(result is None for result in output):
-            raise ProtocolError("meta batch left an operation unresolved")
-        return cast(list[MetaResult], output)
+            fill_meta_responses(output, group, outcome.responses)
+        return finalize_meta_batch(output)
 
 
 class MetaClient(MetaProtocol):
@@ -422,18 +421,9 @@ class MetaClient(MetaProtocol):
     ) -> None:
         super().__init__(serializer if serializer is not None else StrictSerializer())
         self.default_timeout = timeout
-        addresses: list[Addr]
-        if addr is None:
-            addresses = [("localhost", 11211)]
-        elif isinstance(addr, tuple) and len(addr) == 2:
-            addresses = [addr]
-        elif isinstance(addr, list) and addr:
-            addresses = addr
-        else:
-            raise TypeError("addr must be a server tuple or a non-empty list")
         self._servers = [
             _Server(server, username=username, password=password, max_idle=max_idle)
-            for server in addresses
+            for server in normalize_addresses(addr)
         ]
         self._ring = hashring.HashRing(self._servers)
         self.meta = MetaNamespace(self)
@@ -449,8 +439,7 @@ class MetaClient(MetaProtocol):
         return self.default_timeout if timeout is None else timeout
 
     def _server_for(self, key: Key) -> _Server:
-        routing_key = key if isinstance(key, str) else key.decode("latin-1")
-        return cast(_Server, self._ring.get_node(routing_key))
+        return cast(_Server, self._ring.get_node(routing_key(key)))
 
     def close(self) -> None:
         if self._closed:
@@ -519,9 +508,7 @@ class MetaClient(MetaProtocol):
         if self._closed:
             raise RuntimeError("client is closed")
         prepared = [self._prepare(index, op) for index, op in enumerate(operations)]
-        grouped: dict[_Server, list[Prepared]] = {}
-        for item in prepared:
-            grouped.setdefault(self._server_for(item.operation.key), []).append(item)
+        grouped = group_prepared(prepared, self._server_for)
         output: list[Result | None] = [None] * len(prepared)
         outcomes = self._run_pipelines(
             {
@@ -542,15 +529,12 @@ class MetaClient(MetaProtocol):
                 outcome.barrier,
                 cause,
             )
-        if any(item is None for item in output):
-            raise AssertionError("batch executor left an operation unresolved")
-        return BatchResult(output)  # type: ignore[arg-type]
+        return finalize_batch(output)
 
     def _one(self, operation: Operation, timeout: float | None) -> Result:
-        result = cast(Result, self.batch([operation], timeout=timeout)[0])
-        if result.status in (GetStatus.AMBIGUOUS, MutationStatus.AMBIGUOUS):
-            raise AmbiguousWriteError(result)
-        return result
+        return raise_if_ambiguous(
+            cast(Result, self.batch([operation], timeout=timeout)[0])
+        )
 
     def get(
         self,
@@ -804,19 +788,7 @@ class MetaClient(MetaProtocol):
     def touch(
         self, key: Key, ttl: int, *, timeout: float | None = None
     ) -> MutationResult:
-        result = self._one(Get(key, touch=ttl, value=False), timeout)
-        if isinstance(result, GetResult):
-            status = (
-                MutationStatus.STORED
-                if result.status is GetStatus.HIT
-                else (
-                    MutationStatus.NOT_FOUND
-                    if result.status is GetStatus.MISS
-                    else MutationStatus.FAILED
-                )
-            )
-            return MutationResult(key, status, error=result.error)
-        raise AssertionError("unexpected touch result")
+        return touch_result(key, self._one(Get(key, touch=ttl, value=False), timeout))
 
     def flush_all(self, delay: int = 0) -> None:
         if self._closed:

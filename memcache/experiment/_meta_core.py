@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar, cast
 from collections.abc import Callable, Sequence
 
-from ..errors import MemcacheError, ProtocolError
+from ..connection import Addr
+from ..errors import AmbiguousWriteError, MemcacheError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
 from ..serialize import Serializer
 from .meta_api import (
@@ -21,6 +22,7 @@ from .meta_api import (
 from .operation import Arithmetic, Delete, Get, Operation, Set
 from .result import (
     ArithmeticResult,
+    BatchResult,
     GetResult,
     GetStatus,
     ItemMeta,
@@ -34,6 +36,8 @@ from .result import (
     ValueState,
 )
 
+ServerT = TypeVar("ServerT")
+
 
 @dataclass
 class Prepared:
@@ -41,6 +45,90 @@ class Prepared:
     operation: Operation
     command: MetaCommand
     side_effect: bool
+
+
+def normalize_addresses(addr: Addr | list[Addr] | None) -> list[Addr]:
+    """Turn the client constructor's ``addr`` argument into a server list."""
+    if addr is None:
+        return [("localhost", 11211)]
+    if isinstance(addr, tuple) and len(addr) == 2:
+        return [addr]
+    if isinstance(addr, list) and addr:
+        return list(addr)
+    raise TypeError("addr must be a server tuple or a non-empty list")
+
+
+def routing_key(key: Key) -> str:
+    """The string form of ``key`` fed to the hash ring for server routing."""
+    return key if isinstance(key, str) else key.decode("latin-1")
+
+
+def raise_if_ambiguous(result: Result) -> Result:
+    """Single-operation policy: an ambiguous outcome raises, others return."""
+    if result.status in (GetStatus.AMBIGUOUS, MutationStatus.AMBIGUOUS):
+        raise AmbiguousWriteError(result)
+    return result
+
+
+def touch_result(key: Key, result: Result) -> MutationResult:
+    """Recast a value-less touch read as the mutation result callers expect."""
+    if not isinstance(result, GetResult):
+        raise AssertionError("unexpected touch result")
+    status = (
+        MutationStatus.STORED
+        if result.status is GetStatus.HIT
+        else (
+            MutationStatus.NOT_FOUND
+            if result.status is GetStatus.MISS
+            else MutationStatus.FAILED
+        )
+    )
+    return MutationResult(key, status, error=result.error)
+
+
+def group_prepared(
+    prepared: Sequence[Prepared],
+    server_for: Callable[[Key], ServerT],
+) -> dict[ServerT, list[Prepared]]:
+    grouped: dict[ServerT, list[Prepared]] = {}
+    for item in prepared:
+        grouped.setdefault(server_for(item.operation.key), []).append(item)
+    return grouped
+
+
+def finalize_batch(output: list[Result | None]) -> BatchResult:
+    if any(item is None for item in output):
+        raise AssertionError("batch executor left an operation unresolved")
+    return BatchResult(output)  # type: ignore[arg-type]
+
+
+def group_meta_commands(
+    commands: Sequence[MetaCommand],
+    server_for: Callable[[Key], ServerT],
+) -> dict[ServerT, list[tuple[int, MetaCommand]]]:
+    grouped: dict[ServerT, list[tuple[int, MetaCommand]]] = {}
+    for index, command in enumerate(commands):
+        if b"q" in command.flags:
+            raise ValueError("meta batch does not accept quiet commands")
+        grouped.setdefault(server_for(command.key), []).append((index, command))
+    return grouped
+
+
+def fill_meta_responses(
+    output: list[MetaResult | None],
+    group: list[tuple[int, MetaCommand]],
+    responses: Sequence[MetaResult],
+) -> None:
+    if len(responses) != len(group):
+        raise ProtocolError("meta batch received an unexpected response count")
+    for (index, _), response in zip(group, responses):
+        output[index] = response
+
+
+def finalize_meta_batch(output: list[MetaResult | None]) -> list[MetaResult]:
+    if any(result is None for result in output):
+        raise ProtocolError("meta batch left an operation unresolved")
+    return cast(list[MetaResult], output)
 
 
 class MetaProtocol:
