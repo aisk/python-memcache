@@ -151,7 +151,7 @@ def test_server_failure_is_isolated_in_batch():
 
 def test_explicit_get_states_and_values(client):
     assert client.get("missing").status is GetStatus.MISS
-    with pytest.raises(ResultValueError):
+    with pytest.raises(ResultValueError, match="not found"):
         client.get("missing").value
 
     client.set("empty", b"")
@@ -599,3 +599,22 @@ def test_batch_keeps_failures_in_results_and_can_raise_for_them():
         results.raise_for_failures()
     assert client.batch([Get("absent-key")]).raise_for_failures() is not None
     client.close()
+
+
+def test_value_error_names_the_reason_it_has_no_value(client):
+    client.set("named", "value", ttl=60)
+    hit = client.get("named", meta=Meta.CAS)
+
+    # A read that never asked for the payload is a different mistake from a
+    # read that came back empty, so the two say different things.
+    with pytest.raises(ResultValueError, match="did not ask for the value"):
+        client.inspect("named").value
+    with pytest.raises(ResultValueError, match="unchanged"):
+        client.get("named", unless_cas=hit.item.cas).value
+    with pytest.raises(ResultValueError, match="not found"):
+        client.get("absent").value
+
+    # The key is in the message either way, which is what you need when the
+    # traceback is all you have.
+    with pytest.raises(ResultValueError, match="'absent'"):
+        client.get("absent").value

@@ -99,6 +99,13 @@ def check_result(result: Any) -> Any:
     return result
 
 
+_NO_VALUE_REASONS = {
+    GetStatus.MISS: "it was not found",
+    GetStatus.UNCHANGED: "it was unchanged, so the server skipped the payload",
+    GetStatus.PENDING: "another caller holds the lease and has not filled it yet",
+}
+
+
 class GetResult(Generic[T]):
     def __init__(
         self,
@@ -121,9 +128,15 @@ class GetResult(Generic[T]):
 
     @property
     def value(self) -> T:
-        if self.status is not GetStatus.HIT or self._value is _NO_VALUE:
+        if self.status is not GetStatus.HIT:
             raise ResultValueError(
-                "value is only available on a HIT result which requested the value"
+                "key %r has no value to read: %s"
+                % (self.key, _NO_VALUE_REASONS.get(self.status, "the read failed"))
+            )
+        if self._value is _NO_VALUE:
+            raise ResultValueError(
+                "key %r was a hit but the read did not ask for the value; "
+                "pass value=True, or use get() rather than inspect()" % (self.key,)
             )
         return self._value  # type: ignore[no-any-return]
 
