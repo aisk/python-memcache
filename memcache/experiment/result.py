@@ -5,7 +5,14 @@ from enum import Enum, IntFlag, auto
 from typing import Any, Generic, TypeVar
 from collections.abc import Callable, Iterator, Sequence
 
-from ..errors import MemcacheError
+from ..errors import (
+    AlreadyExistsError,
+    AmbiguousWriteError,
+    CasMismatchError,
+    MemcacheError,
+    NotFoundError,
+    OperationFailedError,
+)
 
 T = TypeVar("T")
 Key = str | bytes
@@ -64,6 +71,34 @@ class ResultValueError(MemcacheError):
     """Raised when a result does not carry a usable value."""
 
 
+def failure_error(result: Any) -> MemcacheError | None:
+    """The exception for a result that never reached a usable answer.
+
+    Returns ``None`` when the server did answer, whatever that answer was.
+    Callers raise it ``from result.error`` so the original cause survives.
+    """
+    if result.status in (GetStatus.AMBIGUOUS, MutationStatus.AMBIGUOUS):
+        return AmbiguousWriteError(result)
+    if result.status in (GetStatus.FAILED, MutationStatus.FAILED):
+        return OperationFailedError(result.key)
+    return None
+
+
+def check_result(result: Any) -> Any:
+    """Raise unless the operation reached the outcome the caller asked for."""
+    error = failure_error(result)
+    if error is not None:
+        raise error from result.error
+    status = result.status
+    if status is MutationStatus.CAS_MISMATCH:
+        raise CasMismatchError("cas token for key %r no longer matches" % (result.key,))
+    if status is MutationStatus.ALREADY_EXISTS:
+        raise AlreadyExistsError("key %r already exists" % (result.key,))
+    if status in (MutationStatus.NOT_FOUND, GetStatus.MISS, GetStatus.PENDING):
+        raise NotFoundError("key %r was not found" % (result.key,))
+    return result
+
+
 class GetResult(Generic[T]):
     def __init__(
         self,
@@ -96,6 +131,14 @@ class GetResult(Generic[T]):
         if self.status is GetStatus.HIT and self._value is not _NO_VALUE:
             return self._value  # type: ignore[no-any-return]
         return default
+
+    def check(self) -> GetResult[T]:
+        """Return self, or raise when the read did not produce a value.
+
+        ``UNCHANGED`` passes: an ``unless_cas`` read that skipped the payload
+        is a successful answer, not a missing one.
+        """
+        return check_result(self)  # type: ignore[no-any-return]
 
     def __bool__(self) -> bool:
         return self.status is GetStatus.HIT
@@ -167,6 +210,10 @@ class MutationResult:
     cas: int | None = None
     error: BaseException | None = None
 
+    def check(self) -> MutationResult:
+        """Return self, or raise when the write did not happen."""
+        return check_result(self)  # type: ignore[no-any-return]
+
     def __bool__(self) -> bool:
         return self.status is MutationStatus.STORED
 
@@ -178,6 +225,10 @@ class ArithmeticResult:
     value: int | None = None
     item: ItemMeta = ItemMeta()
     error: BaseException | None = None
+
+    def check(self) -> ArithmeticResult:
+        """Return self, or raise when the counter was not updated."""
+        return check_result(self)  # type: ignore[no-any-return]
 
     def __bool__(self) -> bool:
         return self.status is MutationStatus.STORED
@@ -198,3 +249,20 @@ class BatchResult(Sequence[Result]):
 
     def __iter__(self) -> Iterator[Result]:
         return iter(self.results)
+
+    @property
+    def failures(self) -> tuple[Result, ...]:
+        """Results whose operation never reached a usable answer.
+
+        Semantic outcomes such as a miss or a CAS mismatch are not failures;
+        call :meth:`Result.check` on an individual result to assert those.
+        """
+        return tuple(item for item in self.results if failure_error(item) is not None)
+
+    def raise_for_failures(self) -> BatchResult:
+        """Return self, or raise for the first operation that failed."""
+        for item in self.results:
+            error = failure_error(item)
+            if error is not None:
+                raise error from item.error
+        return self

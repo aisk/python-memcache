@@ -25,7 +25,7 @@ from ._meta_core import (
     group_meta_commands,
     group_prepared,
     normalize_addresses,
-    raise_if_ambiguous,
+    raise_on_failure,
     routing_key,
     touch_result,
 )
@@ -532,7 +532,7 @@ class MetaClient(MetaProtocol):
         return finalize_batch(output)
 
     def _one(self, operation: Operation, timeout: float | None) -> Result:
-        return raise_if_ambiguous(
+        return raise_on_failure(
             cast(Result, self.batch([operation], timeout=timeout)[0])
         )
 

@@ -4,6 +4,7 @@ import pytest_asyncio
 from memcache import MetaCommand
 from memcache.async_connection import PipelineError
 from memcache.experiment import (
+    AlreadyExistsError,
     AmbiguousWriteError,
     AsyncMetaClient,
     Get,
@@ -11,6 +12,8 @@ from memcache.experiment import (
     LeaseState,
     Meta,
     MutationStatus,
+    NotFoundError,
+    OperationFailedError,
     PickleSerializer,
     Set,
     ValueState,
@@ -171,3 +174,34 @@ async def test_server_failure_is_isolated_in_batch():
     assert results[2].status is GetStatus.HIT
     assert results[2].value == "ok"
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_single_operations_raise_instead_of_reporting_failure():
+    async with AsyncMetaClient(("localhost", 1), timeout=0.2) as client:
+        with pytest.raises(OperationFailedError) as read:
+            await client.get("key")
+        assert read.value.key == "key"
+        assert isinstance(read.value.__cause__, OSError)
+
+        with pytest.raises(OperationFailedError):
+            await client.set("key", "value")
+
+
+@pytest.mark.asyncio
+async def test_async_check_matches_the_sync_policy(client):
+    stored = await client.set("checked", "value", ttl=60)
+    assert stored.check() is stored
+    assert (await client.get("checked")).check().value == "value"
+
+    with pytest.raises(AlreadyExistsError):
+        (await client.add("checked", "other")).check()
+    with pytest.raises(NotFoundError):
+        (await client.get("absent")).check()
+
+
+@pytest.mark.asyncio
+async def test_async_batch_keeps_failures_in_results(client):
+    results = await client.batch([Set("kept", "v"), Get("absent")])
+    assert results.failures == ()
+    assert results.raise_for_failures() is results
