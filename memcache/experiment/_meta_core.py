@@ -5,7 +5,7 @@ from typing import Any, TypeVar, cast
 from collections.abc import Callable, Sequence
 
 from ..connection import Addr
-from ..errors import AmbiguousWriteError, MemcacheError, ProtocolError
+from ..errors import MemcacheError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
 from ..serialize import Serializer
 from .meta_api import (
@@ -34,6 +34,7 @@ from .result import (
     MutationStatus,
     Result,
     ValueState,
+    failure_error,
 )
 
 ServerT = TypeVar("ServerT")
@@ -63,10 +64,16 @@ def routing_key(key: Key) -> str:
     return key if isinstance(key, str) else key.decode("latin-1")
 
 
-def raise_if_ambiguous(result: Result) -> Result:
-    """Single-operation policy: an ambiguous outcome raises, others return."""
-    if result.status in (GetStatus.AMBIGUOUS, MutationStatus.AMBIGUOUS):
-        raise AmbiguousWriteError(result)
+def raise_on_failure(result: Result) -> Result:
+    """Single-operation policy: no answer raises, any answer returns.
+
+    A lone operation has nowhere to put "I do not know", so infrastructure
+    trouble leaves through the exception channel. Semantic outcomes such as a
+    miss or a CAS mismatch are answers and stay in the returned status.
+    """
+    error = failure_error(result)
+    if error is not None:
+        raise error from result.error
     return result
 
 

@@ -89,6 +89,16 @@ with MetaClient(("localhost", 11211)) as client:
 
 `AsyncMetaClient` has the same concepts and call shape; its methods and lease `fulfill()` are awaited.
 
+Failures never arrive silently. A single operation has nowhere to put "I never got an answer", so infrastructure trouble (a refused connection, a timeout, a malformed response, a value that will not deserialize) raises `OperationFailedError` with the original cause attached, and a write that was sent but never acknowledged raises `AmbiguousWriteError`. Semantic outcomes such as a miss, an `add` on a taken key or a CAS mismatch are real answers, so they stay in the returned status where you can branch on them. Call `check()` when success is the only outcome you accept:
+
+```python
+    client.add("lock", token, ttl=30).check()   # raises AlreadyExistsError if taken
+    client.cas("key", value, token).check()     # raises CasMismatchError if it moved
+    value = client.get("key").check().value
+```
+
+A batch does have somewhere to put per-operation failure, so one unreachable server spoils only its own operations and the rest of the results stand. Inspect them with `results.failures`, or opt the whole batch into raising with `results.raise_for_failures()`.
+
 For protocol experts, `client.meta` maps the wire commands one-to-one (`get`/`set`/`delete`/`arithmetic`/`debug`, i.e. `mg`/`ms`/`md`/`ma`/`me`) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping:
 
 ```python

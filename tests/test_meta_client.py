@@ -4,6 +4,7 @@ import pytest
 
 from memcache import MetaCommand
 from memcache.experiment import (
+    AlreadyExistsError,
     AmbiguousWriteError,
     Arithmetic,
     ArithmeticResult,
@@ -16,13 +17,15 @@ from memcache.experiment import (
     Meta,
     MetaClient,
     MutationStatus,
+    NotFoundError,
+    OperationFailedError,
     PickleSerializer,
     ResultValueError,
     SerializeError,
     Set,
     ValueState,
 )
-from memcache.errors import MemcacheError, PipelineError
+from memcache.errors import CasMismatchError, MemcacheError, PipelineError
 from memcache.serialize import FLAG_COMPRESSED
 
 
@@ -167,9 +170,9 @@ def test_default_serializer_is_strict(client, pickle_client):
     # Refusing to unpickle matters more than refusing to pickle: loads is
     # the code-execution side. Reads of foreign pickled data must fail.
     pickle_client.set("pickled", {"a": 1})
-    result = client.get("pickled")
-    assert result.status is GetStatus.FAILED
-    assert isinstance(result.error, SerializeError)
+    with pytest.raises(OperationFailedError) as failure:
+        client.get("pickled")
+    assert isinstance(failure.value.__cause__, SerializeError)
 
 
 def test_pickle_serializer_round_trips_objects(pickle_client):
@@ -521,3 +524,78 @@ def test_programming_errors_are_raised_before_batch(client):
     # the stored item, so non-bytes payloads are rejected on any path.
     with pytest.raises(TypeError):
         client.batch([Set("a", "not bytes", mode="prepend")])
+
+
+def test_single_operations_raise_instead_of_reporting_failure():
+    # A lone operation has nowhere to put "no answer", so infrastructure
+    # trouble leaves through the exception channel rather than a status a
+    # caller can forget to read.
+    with MetaClient(("localhost", 1), timeout=0.2) as client:
+        with pytest.raises(OperationFailedError) as read:
+            client.get("key")
+        assert read.value.key == "key"
+        assert isinstance(read.value.__cause__, OSError)
+
+        with pytest.raises(OperationFailedError):
+            client.set("key", "value")
+        with pytest.raises(OperationFailedError):
+            client.increment("counter", initial=0, initial_ttl=60)
+
+
+def test_check_passes_answers_through_and_returns_self(client):
+    stored = client.set("checked", "value", ttl=60, return_cas=True)
+    assert stored.check() is stored
+
+    hit = client.get("checked", meta=Meta.CAS)
+    assert hit.check().value == "value"
+
+    # An unless_cas read that skipped the payload is still an answer.
+    unchanged = client.get("checked", unless_cas=hit.item.cas)
+    assert unchanged.status is GetStatus.UNCHANGED
+    assert unchanged.check() is unchanged
+
+    counter = client.increment("checked:n", initial=1, initial_ttl=60)
+    assert counter.check().value == 1
+
+
+def test_check_raises_per_semantic_outcome(client):
+    client.set("taken", "first", ttl=60)
+
+    with pytest.raises(AlreadyExistsError):
+        client.add("taken", "second").check()
+    with pytest.raises(CasMismatchError):
+        client.cas("taken", "third", 1).check()
+    with pytest.raises(NotFoundError):
+        client.delete("absent").check()
+    with pytest.raises(NotFoundError):
+        client.get("absent").check()
+    with pytest.raises(NotFoundError):
+        client.increment("absent").check()
+
+
+def test_batch_keeps_failures_in_results_and_can_raise_for_them():
+    client = MetaClient([("localhost", 11211), ("localhost", 1)], timeout=0.2)
+    good = bad = None
+    for number in range(10000):
+        key = "check-shard-%d" % number
+        port = client._server_for(key).addr[1]
+        if port == 11211 and good is None:
+            good = key
+        elif port == 1 and bad is None:
+            bad = key
+        if good is not None and bad is not None:
+            break
+    assert good is not None and bad is not None
+
+    results = client.batch([Set(good, "ok"), Set(bad, "no"), Get("absent-key")])
+    # A batch has somewhere to put per-operation failure, so it stays a status.
+    assert results[1].status is MutationStatus.FAILED
+    assert results.failures == (results[1],)
+    # A miss is an answer, not a failure.
+    assert results[2].status is GetStatus.MISS
+    assert results[2] not in results.failures
+
+    with pytest.raises(OperationFailedError):
+        results.raise_for_failures()
+    assert client.batch([Get("absent-key")]).raise_for_failures() is not None
+    client.close()

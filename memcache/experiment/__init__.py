@@ -1,4 +1,12 @@
-from ..errors import AmbiguousWriteError, ProtocolError, SerializeError
+from ..errors import (
+    AlreadyExistsError,
+    AmbiguousWriteError,
+    CasMismatchError,
+    NotFoundError,
+    OperationFailedError,
+    ProtocolError,
+    SerializeError,
+)
 from ..serialize import (
     CompressedSerializer,
     JsonSerializer,
@@ -26,11 +34,13 @@ from .result import (
 )
 
 __all__ = [
+    "AlreadyExistsError",
     "AmbiguousWriteError",
     "Arithmetic",
     "ArithmeticResult",
     "AsyncMetaClient",
     "BatchResult",
+    "CasMismatchError",
     "CompressedSerializer",
     "Delete",
     "Get",
@@ -45,6 +55,8 @@ __all__ = [
     "MetaCommandResult",
     "MutationResult",
     "MutationStatus",
+    "NotFoundError",
+    "OperationFailedError",
     "PickleSerializer",
     "ProtocolError",
     "ResultValueError",
