@@ -10,6 +10,49 @@ RECV_SIZE = 65536
 Addr: TypeAlias = tuple[str, int]
 
 
+MAX_PIPELINE_CHUNK_BYTES = 512 * 1024
+"""How many request bytes may be in flight before the responses are read.
+
+A pipeline that is written in full before anything is read deadlocks once the
+request side fills both socket buffers: the server stops reading to drain its
+own blocked writes, and the client is still sending, so neither side moves and
+the batch dies of timeout rather than slowing down. Writing a bounded chunk and
+reading its barrier before sending the next keeps a reader on the responses at
+all times. The bound is on the request side because that is what the client
+controls; response volume is safe once someone is consuming it.
+"""
+
+
+def command_size(command: MetaCommand) -> int:
+    """Roughly how many bytes a command puts on the wire.
+
+    Only used to pace chunking, so a cheap estimate beats dumping every
+    command twice. Base64 key expansion makes this an undercount by at most a
+    third, well inside the headroom the chunk bound already leaves.
+    """
+    size = len(command.cm) + len(command.key) + 16
+    size += sum(len(flag) + 1 for flag in command.flags)
+    if command.value is not None:
+        size += len(command.value) + 2
+    return size
+
+
+def chunk_pipeline(commands: list[MetaCommand]) -> list[list[MetaCommand]]:
+    """Split a pipeline into chunks small enough to write before reading."""
+    chunks: list[list[MetaCommand]] = []
+    current: list[MetaCommand] = []
+    size = 0
+    for command in commands:
+        width = command_size(command)
+        if current and size + width > MAX_PIPELINE_CHUNK_BYTES:
+            chunks.append(current)
+            current, size = [], 0
+        current.append(command)
+        size += width
+    chunks.append(current)
+    return chunks
+
+
 class Connection:
     def __init__(
         self,

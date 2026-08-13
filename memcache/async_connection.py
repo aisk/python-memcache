@@ -1,6 +1,6 @@
 import anyio
 
-from .connection import RECV_SIZE, Addr
+from .connection import RECV_SIZE, Addr, chunk_pipeline
 from .errors import MemcacheError, PipelineError as PipelineError
 from .meta_command import MetaCommand, MetaResult, ResponseReader
 
@@ -97,21 +97,29 @@ class AsyncConnection:
         ``PipelineError.written`` is conservative: an operation is counted as
         written as soon as its first send starts, since a failed send may have
         transferred an arbitrary prefix to the kernel.
+
+        The pipeline goes out in chunks, each read back through its own ``mn``
+        barrier before the next is sent, so the request side never fills both
+        socket buffers while nobody is reading the responses.
         """
         written = 0
+        confirmed = 0
         responses: list[MetaResult] = []
         try:
             if not self._connected:
                 await self._connect()
-            for command in commands:
-                written += 1
-                await self.stream.send(command.dump())
-            await self.stream.send(b"mn\r\n")
-            while True:
-                result = await self._next_response()
-                if result.is_barrier:
-                    return responses
-                responses.append(result)
+            for chunk in chunk_pipeline(commands):
+                for command in chunk:
+                    written += 1
+                    await self.stream.send(command.dump())
+                await self.stream.send(b"mn\r\n")
+                while True:
+                    result = await self._next_response()
+                    if result.is_barrier:
+                        break
+                    responses.append(result)
+                confirmed += len(chunk)
+            return responses
         except BaseException as exc:
             self._connected = False
             # Cancellation belongs to the caller, not to this server. Wrapping
@@ -120,4 +128,4 @@ class AsyncConnection:
             # reraised untouched once the connection is marked unusable.
             if not isinstance(exc, Exception):
                 raise
-            raise PipelineError(written, responses, exc)
+            raise PipelineError(written, responses, exc, confirmed)

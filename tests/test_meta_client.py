@@ -3,6 +3,8 @@ import threading
 import pytest
 
 from memcache import MetaCommand
+from memcache import connection as connection_module
+from memcache.connection import Connection, chunk_pipeline
 from memcache.experiment.meta_api import build_get
 from memcache.experiment import (
     AlreadyExistsError,
@@ -164,6 +166,49 @@ def test_interrupt_while_reading_a_batch_reaches_the_caller(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         flight.finish(None)
     client.close()
+
+
+def test_chunk_pipeline_splits_on_request_bytes():
+    commands = [build_get("k" * 200) for _ in range(100)]
+    assert len(chunk_pipeline(commands)) == 1
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(connection_module, "MAX_PIPELINE_CHUNK_BYTES", 1024)
+    try:
+        chunks = chunk_pipeline(commands)
+        assert len(chunks) > 1
+        assert sum(len(chunk) for chunk in chunks) == len(commands)
+        assert all(chunk for chunk in chunks)
+    finally:
+        monkeypatch.undo()
+
+
+def test_batch_spanning_chunks_maps_every_response(client, monkeypatch):
+    """Splitting the pipeline must not shuffle results onto the wrong keys."""
+    monkeypatch.setattr(connection_module, "MAX_PIPELINE_CHUNK_BYTES", 512)
+    client.batch([Set("chunk-%d" % i, "v%d" % i) for i in range(40)])
+    results = client.batch([Get("chunk-%d" % i) for i in range(40)])
+    assert [r.status for r in results] == [GetStatus.HIT] * 40
+    assert [r.value for r in results] == ["v%d" % i for i in range(40)]
+
+
+def test_chunks_already_answered_are_not_reported_ambiguous(client, monkeypatch):
+    """A late chunk's failure must not unsettle the chunks before it."""
+    monkeypatch.setattr(connection_module, "MAX_PIPELINE_CHUNK_BYTES", 512)
+    real_send = Connection.send_pipeline
+    calls = {"n": 0}
+
+    def send(self, commands, timeout=None):
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise ConnectionResetError("lost mid-pipeline")
+        return real_send(self, commands, timeout)
+
+    monkeypatch.setattr(Connection, "send_pipeline", send)
+    results = client.batch([Set("late-%d" % i, "v") for i in range(40)])
+    settled = [r for r in results if r.status is MutationStatus.STORED]
+    assert settled, "early chunks should have kept their confirmed outcome"
+    assert all(r.status is not MutationStatus.AMBIGUOUS for r in settled)
 
 
 def test_server_failure_is_isolated_in_batch():

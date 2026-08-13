@@ -430,6 +430,7 @@ class AsyncMetaClient(MetaProtocol):
         written = 0
         failure: BaseException | None = None
         barrier = False
+        confirmed = 0
         try:
             responses = await server.pipeline(commands, timeout)
             written = len(prepared)
@@ -437,10 +438,13 @@ class AsyncMetaClient(MetaProtocol):
         except PipelineError as exc:
             responses = exc.responses
             written = exc.written
+            confirmed = exc.confirmed
             failure = exc.cause
         except Exception as exc:
             failure = exc
-        self._resolve_group(prepared, output, responses, written, barrier, failure)
+        self._resolve_group(
+            prepared, output, responses, written, barrier, failure, confirmed
+        )
 
     async def batch(
         self,

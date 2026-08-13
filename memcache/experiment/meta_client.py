@@ -13,7 +13,7 @@ from collections.abc import Iterator, Sequence
 
 import hashring
 
-from ..connection import Addr, Connection
+from ..connection import Addr, Connection, chunk_pipeline
 from ..errors import PipelineError, ProtocolError
 from ..meta_command import MetaCommand, MetaResult
 from ..serialize import Serializer, StrictSerializer
@@ -142,14 +142,21 @@ class _Server:
     def start_pipeline(
         self, commands: list[MetaCommand], deadline: float | None
     ) -> _InFlight:
-        """Write a full pipeline and return it with its responses unread."""
+        """Write the pipeline's first chunk and return it with responses unread.
+
+        Only the first chunk goes out here so the other servers in a batch can
+        start theirs right away; the rest is written from :meth:`_InFlight
+        .finish`, interleaved with reading, so the request side never outruns
+        the socket buffers.
+        """
+        chunks = chunk_pipeline(commands)
         connection = self._acquire(_remaining(deadline))
         try:
-            connection.send_pipeline(commands, _remaining(deadline))
+            connection.send_pipeline(chunks[0], _remaining(deadline))
         except BaseException:
             self._discard(connection)
             raise
-        return _InFlight(self, connection, len(commands))
+        return _InFlight(self, connection, chunks)
 
     def execute(self, command: MetaCommand, timeout: float | None) -> MetaResult:
         with self._borrow(timeout) as connection:
@@ -170,23 +177,43 @@ class _Server:
 class _InFlight:
     """A pipeline whose commands are written and whose responses are pending."""
 
-    def __init__(self, server: _Server, connection: Connection, count: int) -> None:
+    def __init__(
+        self, server: _Server, connection: Connection, chunks: list[list[MetaCommand]]
+    ) -> None:
         self._server = server
         self._connection = connection
-        self.count = count
+        self._chunks = chunks
+        self.count = sum(len(chunk) for chunk in chunks)
 
     def finish(self, deadline: float | None) -> list[MetaResult]:
+        """Read each chunk's barrier, sending the next one as room frees up."""
+        responses: list[MetaResult] = []
+        written = len(self._chunks[0])
+        confirmed = 0
         try:
-            responses = self._connection.receive_pipeline(
-                self.count, _remaining(deadline)
-            )
+            for position, chunk in enumerate(self._chunks):
+                responses.extend(
+                    self._connection.receive_pipeline(written, _remaining(deadline))
+                )
+                confirmed += len(chunk)
+                if position + 1 < len(self._chunks):
+                    following = self._chunks[position + 1]
+                    self._connection.send_pipeline(following, _remaining(deadline))
+                    written += len(following)
         except BaseException as exc:
             self._server._discard(self._connection)
-            if isinstance(exc, PipelineError) or not isinstance(exc, Exception):
+            if not isinstance(exc, Exception):
                 raise
-            # The whole pipeline is on the wire, so an expired deadline
-            # here still leaves every side effect ambiguous.
-            raise PipelineError(self.count, [], exc)
+            if isinstance(exc, PipelineError):
+                raise PipelineError(
+                    max(written, exc.written),
+                    responses + exc.responses,
+                    exc.cause,
+                    confirmed,
+                )
+            # Everything written so far is on the wire, so an expired deadline
+            # here still leaves the unconfirmed side effects ambiguous.
+            raise PipelineError(written, responses, exc, confirmed)
         self._server._release(self._connection)
         return responses
 
@@ -199,6 +226,7 @@ class _Outcome:
     written: int
     barrier: bool
     error: BaseException | None
+    confirmed: int = 0
 
 
 class MetaNamespace:
@@ -466,7 +494,9 @@ class MetaClient(MetaProtocol):
     @staticmethod
     def _failed_outcome(error: BaseException) -> _Outcome:
         if isinstance(error, PipelineError):
-            return _Outcome(error.responses, error.written, False, error)
+            return _Outcome(
+                error.responses, error.written, False, error, error.confirmed
+            )
         return _Outcome([], 0, False, error)
 
     def _run_pipelines(
@@ -528,6 +558,7 @@ class MetaClient(MetaProtocol):
                 outcome.written,
                 outcome.barrier,
                 cause,
+                outcome.confirmed,
             )
         return finalize_batch(output)
 

@@ -59,8 +59,16 @@ class PipelineError(MemcacheError):
         written: int,
         responses: list[MetaResult],
         cause: BaseException,
+        confirmed: int = 0,
     ) -> None:
         super().__init__(str(cause))
         self.written = written
         self.responses = responses
         self.cause = cause
+        self.confirmed = confirmed
+        """How many leading commands already cleared a barrier of their own.
+
+        A large pipeline is written and read in chunks, so an early chunk can
+        be fully answered before a later one fails. Those commands are settled
+        and must not be reported as ambiguous.
+        """

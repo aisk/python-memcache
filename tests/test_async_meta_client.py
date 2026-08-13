@@ -225,3 +225,15 @@ async def test_cancellation_is_not_repackaged_as_a_pipeline_error(client, monkey
     monkeypatch.setattr(connection.stream, "send", cancel)
     with pytest.raises(anyio.get_cancelled_exc_class()):
         await connection.execute_pipeline([build_get("a")])
+
+
+@pytest.mark.asyncio
+async def test_batch_spanning_chunks_maps_every_response(client, monkeypatch):
+    """The async pipeline chunks too; results must stay on their own keys."""
+    from memcache import connection as connection_module
+
+    monkeypatch.setattr(connection_module, "MAX_PIPELINE_CHUNK_BYTES", 512)
+    await client.batch([Set("achunk-%d" % i, "v%d" % i) for i in range(40)])
+    results = await client.batch([Get("achunk-%d" % i) for i in range(40)])
+    assert [r.status for r in results] == [GetStatus.HIT] * 40
+    assert [r.value for r in results] == ["v%d" % i for i in range(40)]

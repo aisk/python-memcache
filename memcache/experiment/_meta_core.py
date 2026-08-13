@@ -434,7 +434,16 @@ class MetaProtocol:
         written: int,
         barrier: bool,
         failure: BaseException | None,
+        confirmed: int = 0,
     ) -> None:
+        """Attribute one server's responses back onto its operations.
+
+        ``confirmed`` counts leading commands that cleared a barrier of their
+        own in an earlier chunk. Their silence is the ordinary quiet-protocol
+        kind and means a settled outcome, exactly as ``barrier`` does for the
+        whole pipeline, so a later chunk's failure must not drag them into
+        FAILED or AMBIGUOUS.
+        """
         by_index, index_failure = self._index_responses(responses)
         if index_failure is not None:
             failure = index_failure
@@ -442,7 +451,7 @@ class MetaProtocol:
             candidate = by_index.get(item.index)
             if candidate is not None:
                 self._record_parsed(output, item, candidate)
-            elif barrier:
+            elif barrier or position < confirmed:
                 self._record_parsed(output, item, None)
             else:
                 error = failure or MemcacheError("pipeline did not reach barrier")
