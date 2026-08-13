@@ -211,6 +211,17 @@ def test_chunks_already_answered_are_not_reported_ambiguous(client, monkeypatch)
     assert all(r.status is not MutationStatus.AMBIGUOUS for r in settled)
 
 
+def test_failed_result_value_chains_the_real_error():
+    """Reading .value on a FAILED result must not hide why it failed."""
+    client = MetaClient(("localhost", 1), timeout=0.3)
+    result = client.batch([Get("k")])[0]
+    assert isinstance(result.error, OSError)
+    with pytest.raises(ResultValueError) as info:
+        result.value
+    assert info.value.__cause__ is result.error
+    client.close()
+
+
 def test_server_failure_is_isolated_in_batch():
     client = MetaClient([("localhost", 11211), ("localhost", 1)], timeout=0.2)
     good = bad = None

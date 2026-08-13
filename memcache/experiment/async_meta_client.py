@@ -128,9 +128,13 @@ class _Server:
             with anyio.fail_after(timeout):
                 return await connection.execute_meta_command(command)
 
-    async def flush(self, delay: int) -> None:
+    async def flush(self, delay: int, timeout: float | None) -> None:
         async with self._borrow() as connection:
-            await connection.flush_all(delay)
+            if timeout is None:
+                await connection.flush_all(delay)
+                return
+            with anyio.fail_after(timeout):
+                await connection.flush_all(delay)
 
     async def close(self) -> None:
         self._closed = True
@@ -735,4 +739,4 @@ class AsyncMetaClient(MetaProtocol):
         positive("delay", delay)
         async with anyio.create_task_group() as tasks:
             for server in self._servers:
-                tasks.start_soon(server.flush, delay)
+                tasks.start_soon(server.flush, delay, self.default_timeout)

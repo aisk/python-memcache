@@ -135,10 +135,13 @@ class GetResult(Generic[T]):
     @property
     def value(self) -> T:
         if self.status is not GetStatus.HIT:
+            # Chained so a FAILED result surfaces the ConnectionRefusedError or
+            # TimeoutError behind it. Without this the traceback reads like a
+            # usage mistake and the real cause is lost exactly when it matters.
             raise ResultValueError(
                 "key %r has no value to read: %s"
                 % (self.key, _NO_VALUE_REASONS.get(self.status, "the read failed"))
-            )
+            ) from self.error
         if self._value is _NO_VALUE:
             raise ResultValueError(
                 "key %r was a hit but the read did not ask for the value; "

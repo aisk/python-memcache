@@ -237,3 +237,24 @@ async def test_batch_spanning_chunks_maps_every_response(client, monkeypatch):
     results = await client.batch([Get("achunk-%d" % i) for i in range(40)])
     assert [r.status for r in results] == [GetStatus.HIT] * 40
     assert [r.value for r in results] == ["v%d" % i for i in range(40)]
+
+
+@pytest.mark.asyncio
+async def test_flush_all_honours_the_client_timeout():
+    """flush_all used to have no deadline at all and could hang forever."""
+    import socket
+    import threading
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    port = listener.getsockname()[1]
+    threading.Thread(
+        target=lambda: [listener.accept() for _ in range(4)], daemon=True
+    ).start()
+
+    silent = AsyncMetaClient(("127.0.0.1", port), timeout=0.3)
+    with pytest.raises(TimeoutError):
+        await silent.flush_all()
+    listener.close()
