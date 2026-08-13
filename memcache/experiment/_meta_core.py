@@ -60,8 +60,17 @@ def normalize_addresses(addr: Addr | list[Addr] | None) -> list[Addr]:
 
 
 def routing_key(key: Key) -> str:
-    """The string form of ``key`` fed to the hash ring for server routing."""
-    return key if isinstance(key, str) else key.decode("latin-1")
+    """The string form of ``key`` fed to the hash ring for server routing.
+
+    Both key representations are normalized to the bytes that actually go on
+    the wire before the ring sees them. Routing on the raw ``str`` instead
+    would send a non-ascii key and its utf-8 ``bytes`` twin to different
+    servers even though both name the same item, so a value written through
+    one representation would be invisible through the other. latin-1 is the
+    transport back to ``str`` because it is the one codec that maps every
+    byte, and it leaves ascii keys exactly where they already route.
+    """
+    return key_bytes(key).decode("latin-1")
 
 
 def raise_on_failure(result: Result) -> Result:

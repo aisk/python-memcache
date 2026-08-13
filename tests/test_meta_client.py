@@ -125,6 +125,18 @@ def test_batch_marks_written_side_effects_ambiguous(monkeypatch):
     client.close()
 
 
+def test_str_and_bytes_keys_route_to_the_same_server():
+    client = MetaClient([("localhost", 11211), ("localhost", 1), ("localhost", 2)])
+    keys = ["cafe\u0301-%d" % number for number in range(300)]
+    split = [
+        key
+        for key in keys
+        if client._server_for(key) is not client._server_for(key.encode())
+    ]
+    assert split == []
+    client.close()
+
+
 def test_server_failure_is_isolated_in_batch():
     client = MetaClient([("localhost", 11211), ("localhost", 1)], timeout=0.2)
     good = bad = None
