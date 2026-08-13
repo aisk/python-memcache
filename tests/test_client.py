@@ -198,3 +198,8 @@ def test_get_many(client):
     result = client.get_many(["gm_key1", "gm_key2", "gm_missing"])
     assert result == {"gm_key1": "val1", "gm_key2": "val2"}
     assert "gm_missing" not in result
+
+
+def test_get_many_keys_results_by_the_key_the_caller_passed(client):
+    client.set(b"gm_bytes", "val")
+    assert client.get_many([b"gm_bytes"]) == {b"gm_bytes": "val"}

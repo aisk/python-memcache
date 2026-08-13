@@ -155,13 +155,14 @@ class AsyncMemcache:
             value = value.encode()
         return (await self._meta.prepend(key, value)).status is MutationStatus.STORED
 
-    async def get_many(self, keys: list[bytes | str]) -> dict[str, Any]:
+    async def get_many(self, keys: list[bytes | str]) -> dict[bytes | str, Any]:
+        """Read several keys at once, keyed by the key objects passed in.
+
+        A hit is reported under the very key the caller handed over, bytes or
+        str, so the result stays indexable by whatever the caller already has.
+        """
         results = await self._meta.batch([Get(key) for key in keys])
-        return {
-            r.key if isinstance(r.key, str) else r.key.decode("latin-1"): r.value
-            for r in results
-            if r.status is GetStatus.HIT
-        }
+        return {r.key: r.value for r in results if r.status is GetStatus.HIT}
 
     async def incr(self, key: bytes | str, value: int = 1) -> int:
         result = await self._meta.increment(key, value)
