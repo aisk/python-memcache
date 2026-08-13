@@ -3,7 +3,7 @@ from typing import Any
 from .async_connection import AsyncConnection  # noqa: F401 re-export
 from .connection import Addr
 from .errors import CasMismatchError, MemcacheError
-from .experiment import Get, Meta
+from .experiment import Field, Get
 from .experiment.async_meta_client import AsyncMetaClient
 from .experiment.result import GetStatus, MutationStatus
 from .meta_command import MetaCommand, MetaResult
@@ -91,7 +91,7 @@ class AsyncMemcache:
         :param key: The key to retrieve
         :return: A tuple of (value, cas_token) or None if key doesn't exist
         """
-        r = await self._meta.get(key, meta=Meta.CAS)
+        r = await self._meta.get(key, fields=Field.CAS)
         if r.status is not GetStatus.HIT:
             return None
         if r.cas_token is None:

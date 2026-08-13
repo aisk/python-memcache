@@ -37,12 +37,12 @@ Meta client (experimental)
 
 .. code-block:: python
 
-   from memcache.experiment import Get, GetStatus, Meta, MetaClient, Set
+   from memcache.experiment import Field, Get, GetStatus, MetaClient, Set
 
    with MetaClient(("localhost", 11211)) as client:
        client.set("key", {"message": "value"}, ttl=60)
 
-       result = client.get("key", meta=Meta.CAS | Meta.TTL | Meta.SIZE)
+       result = client.get("key", fields=Field.CAS | Field.TTL | Field.SIZE)
        if result.status is GetStatus.HIT:
            print(result.value, result.item.cas, result.item.ttl)
 

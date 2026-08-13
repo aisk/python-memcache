@@ -49,7 +49,13 @@ class LeaseState(Enum):
     BUSY = auto()
 
 
-class Meta(IntFlag):
+class Field(IntFlag):
+    """Item metadata a read asks the server to return alongside the value.
+
+    Each flag maps to one mg return flag and lands on :class:`ItemFields`, so
+    ``Field.CAS`` fills ``result.item.cas``.
+    """
+
     NONE = 0
     CAS = 1 << 0
     TTL = 1 << 1
@@ -59,7 +65,7 @@ class Meta(IntFlag):
 
 
 @dataclass(frozen=True)
-class ItemMeta:
+class ItemFields:
     cas: int | None = None
     ttl: int | None = None
     size: int | None = None
@@ -113,14 +119,14 @@ class GetResult(Generic[T]):
         key: Key,
         status: GetStatus,
         value: Any = _NO_VALUE,
-        item: ItemMeta | None = None,
+        item: ItemFields | None = None,
         value_state: ValueState = ValueState.MISSING,
         lease_state: LeaseState = LeaseState.NONE,
         error: BaseException | None = None,
     ) -> None:
         self.key = key
         self.status = status
-        self.item = item or ItemMeta()
+        self.item = item or ItemFields()
         self.value_state = value_state
         self.lease_state = lease_state
         self.error = error
@@ -236,7 +242,7 @@ class ArithmeticResult:
     key: Key
     status: MutationStatus
     value: int | None = None
-    item: ItemMeta = ItemMeta()
+    item: ItemFields = ItemFields()
     error: BaseException | None = None
 
     def check(self) -> ArithmeticResult:

@@ -10,11 +10,11 @@ from memcache.experiment import (
     ArithmeticResult,
     CompressedSerializer,
     Delete,
+    Field,
     Get,
     GetStatus,
     JsonSerializer,
     LeaseState,
-    Meta,
     MetaClient,
     MutationStatus,
     NotFoundError,
@@ -222,7 +222,7 @@ def test_metadata_inspect_and_conditional_read(client):
     assert stored.status is MutationStatus.STORED
     assert stored.cas is not None
 
-    result = client.get("article", meta=Meta.CAS | Meta.TTL | Meta.SIZE)
+    result = client.get("article", fields=Field.CAS | Field.TTL | Field.SIZE)
     assert result.item.cas == stored.cas
     assert result.item.ttl is not None and result.item.ttl > 0
     assert result.item.size == 4
@@ -250,7 +250,7 @@ def test_store_modes_versions_and_conveniences(client):
     assert client.add("condition", "second").status is MutationStatus.ALREADY_EXISTS
     assert client.set("absent", "x", mode="replace").status is MutationStatus.NOT_FOUND
 
-    old = client.get("condition", meta=Meta.CAS)
+    old = client.get("condition", fields=Field.CAS)
     assert (
         client.cas("condition", "second", old.item.cas).status is MutationStatus.STORED
     )
@@ -261,14 +261,14 @@ def test_store_modes_versions_and_conveniences(client):
 
     versioned = client.set("versioned", "v", version=42, return_cas=True)
     assert versioned.cas == 42
-    assert client.get("versioned", meta=Meta.CAS).item.cas == 42
+    assert client.get("versioned", fields=Field.CAS).item.cas == 42
 
 
 def test_batch_is_ordered_pipeline_and_keeps_duplicates(client):
     client.set("a", "A")
     results = client.batch(
         [
-            Get("a", meta=Meta.CAS),
+            Get("a", fields=Field.CAS),
             Get(b"missing"),
             Set("b", b"B"),
             Delete("absent"),
@@ -355,7 +355,7 @@ def test_byte_concatenation_arithmetic_touch_and_delete(client):
     assert client.touch("n", 60).status is MutationStatus.STORED
     assert client.touch("no", 60).status is MutationStatus.NOT_FOUND
 
-    current = client.get("n", meta=Meta.CAS)
+    current = client.get("n", fields=Field.CAS)
     assert (
         client.delete("n", compare_cas=current.item.cas).status is MutationStatus.STORED
     )
@@ -546,7 +546,7 @@ def test_check_passes_answers_through_and_returns_self(client):
     stored = client.set("checked", "value", ttl=60, return_cas=True)
     assert stored.check() is stored
 
-    hit = client.get("checked", meta=Meta.CAS)
+    hit = client.get("checked", fields=Field.CAS)
     assert hit.check().value == "value"
 
     # An unless_cas read that skipped the payload is still an answer.
@@ -603,7 +603,7 @@ def test_batch_keeps_failures_in_results_and_can_raise_for_them():
 
 def test_value_error_names_the_reason_it_has_no_value(client):
     client.set("named", "value", ttl=60)
-    hit = client.get("named", meta=Meta.CAS)
+    hit = client.get("named", fields=Field.CAS)
 
     # A read that never asked for the payload is a different mistake from a
     # read that came back empty, so the two say different things.

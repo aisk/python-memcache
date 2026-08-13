@@ -4,7 +4,7 @@ from .connection import Addr, Connection  # re-export for backward compat
 from .errors import CasMismatchError, MemcacheError
 from .experiment.meta_client import MetaClient
 from .experiment.operation import Get
-from .experiment.result import GetStatus, Meta, MutationStatus
+from .experiment.result import Field, GetStatus, MutationStatus
 from .meta_command import MetaCommand, MetaResult
 from .serialize import dump, load, DumpFunc, FuncSerializer, LoadFunc
 
@@ -88,7 +88,7 @@ class Memcache:
         :param key: The key to retrieve
         :return: A tuple of (value, cas_token) or None if key doesn't exist
         """
-        r = self._meta.get(key, meta=Meta.CAS)
+        r = self._meta.get(key, fields=Field.CAS)
         if r.status is not GetStatus.HIT:
             return None
         if r.cas_token is None:

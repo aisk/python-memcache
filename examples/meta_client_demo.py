@@ -25,12 +25,12 @@ from memcache.experiment import (
     ArithmeticResult,
     AsyncMetaClient,
     Delete,
+    Field,
     Get,
     GetResult,
     GetStatus,
     JsonSerializer,
     LeaseState,
-    Meta,
     MetaClient,
     MutationStatus,
     NotFoundError,
@@ -137,12 +137,12 @@ def demo_metadata(client: MetaClient) -> None:
     client.set("doc", "body", ttl=120)
 
     # Ask for the extra fields you need; each flag is one wire flag.
-    result = client.get("doc", meta=Meta.CAS | Meta.TTL | Meta.SIZE)
+    result = client.get("doc", fields=Field.CAS | Field.TTL | Field.SIZE)
     print("cas:", result.item.cas, "ttl:", result.item.ttl, "size:", result.item.size)
 
     # inspect() reads metadata without transferring the value and without
     # bumping the LRU, which makes it safe for monitoring code.
-    probe = client.inspect("doc", meta=Meta.TTL | Meta.SIZE | Meta.HIT_BEFORE)
+    probe = client.inspect("doc", fields=Field.TTL | Field.SIZE | Field.HIT_BEFORE)
     print("inspect ttl:", probe.item.ttl, "hit_before:", probe.item.hit_before)
 
     # touch() extends the TTL in place.
@@ -161,7 +161,7 @@ def demo_conditional_writes(client: MetaClient) -> None:
     print("add new key:", client.add("user:1", "alice", ttl=60).status)
     print("add again:", client.add("user:1", "bob").status)
 
-    current = client.get("user:1", meta=Meta.CAS)
+    current = client.get("user:1", fields=Field.CAS)
     token = current.item.cas
     assert token is not None
 
@@ -171,7 +171,7 @@ def demo_conditional_writes(client: MetaClient) -> None:
     retry = client.cas("user:1", "alice3", token)
     print("cas with stale token:", retry.status)
     if retry.status is MutationStatus.CAS_MISMATCH:
-        latest = client.get("user:1", meta=Meta.CAS)
+        latest = client.get("user:1", fields=Field.CAS)
         assert latest.item.cas is not None
         print("retried:", client.cas("user:1", "alice3", latest.item.cas).status)
 
@@ -219,7 +219,7 @@ def demo_unless_cas(client: MetaClient) -> None:
     section("unless_cas")
 
     client.set("config", "v1")
-    cached = client.get("config", meta=Meta.CAS)
+    cached = client.get("config", fields=Field.CAS)
     token = cached.item.cas
     assert token is not None
 
@@ -303,7 +303,7 @@ def demo_batch(client: MetaClient) -> None:
 
     results = client.batch(
         [
-            Get("b:1", meta=Meta.CAS),
+            Get("b:1", fields=Field.CAS),
             Get("b:missing"),
             Set("b:3", "three", ttl=60),
             Arithmetic("b:counter", 2, initial=0, initial_ttl=60),
@@ -421,7 +421,7 @@ async def demo_async(addr: tuple[str, int]) -> None:
 
     async with AsyncMetaClient(addr) as client:
         await client.set("async:key", "value", ttl=60)
-        result = await client.get("async:key", meta=Meta.CAS)
+        result = await client.get("async:key", fields=Field.CAS)
         print("get:", result.status, result.value, "cas:", result.item.cas)
 
         results = await client.batch([Get("async:key"), Set("async:other", 1)])

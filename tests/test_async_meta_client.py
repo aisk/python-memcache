@@ -7,10 +7,10 @@ from memcache.experiment import (
     AlreadyExistsError,
     AmbiguousWriteError,
     AsyncMetaClient,
+    Field,
     Get,
     GetStatus,
     LeaseState,
-    Meta,
     MutationStatus,
     NotFoundError,
     OperationFailedError,
@@ -70,7 +70,7 @@ async def test_async_api_has_the_same_shape(client):
     assert stored.status is MutationStatus.STORED
     assert stored.cas is not None
 
-    result = await client.get("key", meta=Meta.CAS | Meta.TTL)
+    result = await client.get("key", fields=Field.CAS | Field.TTL)
     assert result.status is GetStatus.HIT
     assert result.value == "value 1"
     assert result.item.cas == stored.cas

@@ -64,12 +64,12 @@ Async usage mirrors the sync API with `AsyncMemcache` and `await`.
 `MetaClient` is a high-level client for memcached's meta protocol. The core methods (`get`/`set`/`delete`/`increment`/`batch`) cover the full protocol surface, while convenience wrappers such as `add`, `cas`, `invalidate` and `get_with_lease` package common usage patterns with safer defaults. Every result has an explicit status.
 
 ```python
-from memcache.experiment import Get, GetStatus, Meta, MetaClient, Set
+from memcache.experiment import Field, Get, GetStatus, MetaClient, Set
 
 with MetaClient(("localhost", 11211)) as client:
     client.set("key", {"message": "value"}, ttl=60)
 
-    result = client.get("key", meta=Meta.CAS | Meta.TTL | Meta.SIZE)
+    result = client.get("key", fields=Field.CAS | Field.TTL | Field.SIZE)
     if result.status is GetStatus.HIT:
         print(result.value, result.item.cas, result.item.ttl)
 

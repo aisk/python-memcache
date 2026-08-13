@@ -46,10 +46,10 @@ from .operation import Arithmetic, Delete, Get, Operation, Set
 from .result import (
     ArithmeticResult,
     BatchResult,
+    Field,
     GetResult,
     Key,
     LeaseResult,
-    Meta,
     MutationResult,
     Result,
 )
@@ -474,7 +474,7 @@ class AsyncMetaClient(MetaProtocol):
         key: Key,
         *,
         value: bool = True,
-        meta: Meta = Meta.NONE,
+        fields: Field = Field.NONE,
         touch: int | None = None,
         no_lru_bump: bool = False,
         unless_cas: int | None = None,
@@ -490,7 +490,7 @@ class AsyncMetaClient(MetaProtocol):
         return await self._one(  # type: ignore[return-value]
             Get(
                 key,
-                meta=meta,
+                fields=fields,
                 touch=touch,
                 no_lru_bump=no_lru_bump,
                 unless_cas=unless_cas,
@@ -505,12 +505,12 @@ class AsyncMetaClient(MetaProtocol):
         self,
         key: Key,
         *,
-        meta: Meta = Meta.CAS | Meta.TTL | Meta.SIZE,
+        fields: Field = Field.CAS | Field.TTL | Field.SIZE,
         no_lru_bump: bool = True,
         timeout: float | None = None,
     ) -> GetResult[Any]:
         return await self._one(  # type: ignore[return-value]
-            Get(key, meta=meta, no_lru_bump=no_lru_bump, value=False), timeout
+            Get(key, fields=fields, no_lru_bump=no_lru_bump, value=False), timeout
         )
 
     async def get_with_lease(
@@ -519,13 +519,13 @@ class AsyncMetaClient(MetaProtocol):
         *,
         lease_ttl: int,
         refresh_before: int | None = None,
-        meta: Meta = Meta.NONE,
+        fields: Field = Field.NONE,
         timeout: float | None = None,
     ) -> LeaseResult[Any]:
         return await self._one(  # type: ignore[return-value]
             Get(
                 key,
-                meta=meta,
+                fields=fields,
                 lease_ttl=lease_ttl,
                 refresh_before=refresh_before,
             ),

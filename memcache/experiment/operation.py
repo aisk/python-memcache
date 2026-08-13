@@ -3,13 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .result import Key, Meta
+from .result import Field, Key
 
 
 @dataclass(frozen=True)
 class Get:
     key: Key
-    meta: Meta = Meta.NONE
+    fields: Field = Field.NONE
     touch: int | None = None
     no_lru_bump: bool = False
     unless_cas: int | None = None

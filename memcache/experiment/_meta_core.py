@@ -23,13 +23,13 @@ from .operation import Arithmetic, Delete, Get, Operation, Set
 from .result import (
     ArithmeticResult,
     BatchResult,
+    Field,
     GetResult,
     GetStatus,
-    ItemMeta,
+    ItemFields,
     Key,
     LeaseResult,
     LeaseState,
-    Meta,
     MutationResult,
     MutationStatus,
     Result,
@@ -166,18 +166,18 @@ class MetaProtocol:
             raise ValueError("refresh_before requires lease_ttl")
         if operation.unless_cas is not None and not operation.value:
             raise ValueError("unless_cas requires a value read")
-        requested_meta = operation.meta
+        requested = operation.fields
         if operation.lease_ttl is not None or operation.unless_cas is not None:
-            requested_meta |= Meta.CAS
+            requested |= Field.CAS
         command = build_get(
             operation.key,
             value=operation.value,
             return_client_flags=True,
-            return_cas=bool(requested_meta & Meta.CAS),
-            return_ttl=bool(requested_meta & Meta.TTL),
-            return_size=bool(requested_meta & Meta.SIZE),
-            return_last_access=bool(requested_meta & Meta.LAST_ACCESS),
-            return_hit_before=bool(requested_meta & Meta.HIT_BEFORE),
+            return_cas=bool(requested & Field.CAS),
+            return_ttl=bool(requested & Field.TTL),
+            return_size=bool(requested & Field.SIZE),
+            return_last_access=bool(requested & Field.LAST_ACCESS),
+            return_hit_before=bool(requested & Field.HIT_BEFORE),
             touch=operation.touch,
             vivify_ttl=operation.lease_ttl,
             recache_ttl=operation.refresh_before,
@@ -290,7 +290,7 @@ class MetaProtocol:
                 operation.key,
                 arithmetic_status,
                 value=value,
-                item=ItemMeta(cas=wire.cas, ttl=wire.ttl),
+                item=ItemFields(cas=wire.cas, ttl=wire.ttl),
             )
         return MutationResult(
             operation.key,
@@ -307,7 +307,7 @@ class MetaProtocol:
                 status=GetStatus.FAILED,
                 error=ProtocolError("unexpected get response %r" % wire.rc),
             )
-        item = ItemMeta(
+        item = ItemFields(
             cas=wire.cas,
             ttl=wire.ttl,
             size=wire.size,
