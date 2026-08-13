@@ -105,7 +105,7 @@ class Connection:
                 written += 1
                 self.socket.sendall(command.dump())
             self.socket.sendall(b"mn\r\n")
-        except BaseException as exc:
+        except Exception as exc:
             raise PipelineError(written, [], exc)
 
     def receive_pipeline(
@@ -125,7 +125,7 @@ class Connection:
                 if result.is_barrier:
                     return responses
                 responses.append(result)
-        except BaseException as exc:
+        except Exception as exc:
             raise PipelineError(written, responses, exc)
 
     def execute_pipeline(

@@ -3,6 +3,7 @@ import threading
 import pytest
 
 from memcache import MetaCommand
+from memcache.experiment.meta_api import build_get
 from memcache.experiment import (
     AlreadyExistsError,
     AmbiguousWriteError,
@@ -134,6 +135,34 @@ def test_str_and_bytes_keys_route_to_the_same_server():
         if client._server_for(key) is not client._server_for(key.encode())
     ]
     assert split == []
+    client.close()
+
+
+def test_interrupt_during_a_batch_reaches_the_caller(monkeypatch):
+    """Ctrl-C is the caller's control flow, not one server's failed outcome."""
+    client = MetaClient(("localhost", 11211))
+
+    def interrupt(commands, deadline):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(client._servers[0], "start_pipeline", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        client.batch([Get("a"), Get("b")])
+    with pytest.raises(KeyboardInterrupt):
+        client.get("a")
+    client.close()
+
+
+def test_interrupt_while_reading_a_batch_reaches_the_caller(monkeypatch):
+    client = MetaClient(("localhost", 11211))
+    flight = client._servers[0].start_pipeline([build_get("a")], None)
+
+    def interrupt(written, timeout=None):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(flight._connection, "receive_pipeline", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        flight.finish(None)
     client.close()
 
 

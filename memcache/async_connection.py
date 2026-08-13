@@ -114,4 +114,10 @@ class AsyncConnection:
                 responses.append(result)
         except BaseException as exc:
             self._connected = False
+            # Cancellation belongs to the caller, not to this server. Wrapping
+            # it in PipelineError would turn a cancel scope's own signal into
+            # an ordinary error and break structured concurrency, so it is
+            # reraised untouched once the connection is marked unusable.
+            if not isinstance(exc, Exception):
+                raise
             raise PipelineError(written, responses, exc)

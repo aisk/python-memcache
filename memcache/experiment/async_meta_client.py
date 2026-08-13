@@ -95,7 +95,7 @@ class _Server:
         except BaseException:
             try:
                 await connection.close()
-            except BaseException:
+            except Exception:
                 pass
             raise
         else:
@@ -109,7 +109,7 @@ class _Server:
             return
         try:
             await connection.close()
-        except BaseException:
+        except Exception:
             pass
 
     async def pipeline(
@@ -138,7 +138,7 @@ class _Server:
             connection = self._idle.popleft()
             try:
                 await connection.close()
-            except BaseException:
+            except Exception:
                 pass
 
 
@@ -438,7 +438,7 @@ class AsyncMetaClient(MetaProtocol):
             responses = exc.responses
             written = exc.written
             failure = exc.cause
-        except BaseException as exc:
+        except Exception as exc:
             failure = exc
         self._resolve_group(prepared, output, responses, written, barrier, failure)
 

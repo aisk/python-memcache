@@ -205,3 +205,23 @@ async def test_async_batch_keeps_failures_in_results(client):
     results = await client.batch([Set("kept", "v"), Get("absent")])
     assert results.failures == ()
     assert results.raise_for_failures() is results
+
+
+@pytest.mark.asyncio
+async def test_cancellation_is_not_repackaged_as_a_pipeline_error(client, monkeypatch):
+    """A cancel scope's own exception must not come back as an ordinary error."""
+    import anyio
+
+    from memcache.experiment.meta_api import build_get
+
+    from memcache.async_connection import AsyncConnection
+
+    connection = AsyncConnection(("localhost", 11211))
+    await connection.execute_meta_command(build_get("warmup"))
+
+    async def cancel(payload):
+        raise anyio.get_cancelled_exc_class()()
+
+    monkeypatch.setattr(connection.stream, "send", cancel)
+    with pytest.raises(anyio.get_cancelled_exc_class()):
+        await connection.execute_pipeline([build_get("a")])

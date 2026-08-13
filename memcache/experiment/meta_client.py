@@ -116,7 +116,7 @@ class _Server:
     def _discard(self, connection: Connection) -> None:
         try:
             connection.close()
-        except BaseException:
+        except Exception:
             pass
 
     @contextmanager
@@ -182,7 +182,7 @@ class _InFlight:
             )
         except BaseException as exc:
             self._server._discard(self._connection)
-            if isinstance(exc, PipelineError):
+            if isinstance(exc, PipelineError) or not isinstance(exc, Exception):
                 raise
             # The whole pipeline is on the wire, so an expired deadline
             # here still leaves every side effect ambiguous.
@@ -488,12 +488,12 @@ class MetaClient(MetaProtocol):
         for server, commands in grouped.items():
             try:
                 pending.append((server, server.start_pipeline(commands, deadline)))
-            except BaseException as exc:
+            except Exception as exc:
                 outcomes[server] = self._failed_outcome(exc)
         for server, flight in pending:
             try:
                 responses = flight.finish(deadline)
-            except BaseException as exc:
+            except Exception as exc:
                 outcomes[server] = self._failed_outcome(exc)
             else:
                 outcomes[server] = _Outcome(responses, flight.count, True, None)
@@ -798,7 +798,7 @@ class MetaClient(MetaProtocol):
         for server in self._servers:
             try:
                 server.flush(delay, self.default_timeout)
-            except BaseException as exc:
+            except Exception as exc:
                 if failure is None:
                     failure = exc
         if failure is not None:

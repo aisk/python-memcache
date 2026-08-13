@@ -423,7 +423,7 @@ class MetaProtocol:
     ) -> None:
         try:
             output[item.index] = self._parse(item, response)
-        except BaseException as exc:
+        except Exception as exc:
             output[item.index] = self._failure(item, False, exc)
 
     def _resolve_group(
