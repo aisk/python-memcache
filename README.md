@@ -41,9 +41,9 @@ client.cas("key", "new_value", token)
 
 Async usage mirrors the sync API with `AsyncMemcache` and `await`.
 
-### MetaClient (Advanced)
+### Scenario client (Experimental)
 
-> **Experimental.** `MetaClient` lives under `memcache.experiment` and its API
+> **Experimental.** The scenario client lives under `memcache.experiment` and its API
 > may change in any minor release. If you depend on it, pin the **minor version**
 > in your dependency spec. Patch releases (`x.y.Z`) will not introduce breaking
 > changes, but minor releases (`x.Y.0`) might.
@@ -61,54 +61,69 @@ Async usage mirrors the sync API with `AsyncMemcache` and `await`.
 > ]
 > ```
 
-`MetaClient` is a high-level client for memcached's meta protocol. The core methods (`get`/`set`/`delete`/`increment`/`batch`) cover the full protocol surface, while convenience wrappers such as `add`, `cas`, `invalidate` and `get_with_lease` package common usage patterns with safer defaults. Every result has an explicit status.
+`memcache.experiment.Memcache` is a scenario-level client built on memcached's meta protocol: one method per usage scenario, business values in and out. Reads answer a miss with a default instead of an error, failures leave through exceptions, and protocol concepts (CAS tokens, lease flags, stale markers) never appear in your code. Policies such as the serializer, a key prefix, and the failure behavior live in the constructor; every write states its lifetime (`FOREVER` for no expiry).
 
 ```python
-from memcache.experiment import Field, Get, GetStatus, MetaClient, Set
+from memcache.experiment import Memcache, JsonSerializer, FOREVER
 
-with MetaClient(("localhost", 11211)) as client:
-    client.set("key", {"message": "value"}, ttl=60)
+cache = Memcache(("localhost", 11211), serializer=JsonSerializer())
 
-    result = client.get("key", fields=Field.CAS | Field.TTL | Field.SIZE)
-    if result.status is GetStatus.HIT:
-        print(result.value, result.item.cas, result.item.ttl)
+# Object cache: a miss is a normal answer.
+cache.set("user:1", {"name": "alice"}, ttl=600)
+user = cache.get("user:1")
+cache.delete("user:1")
 
-    # Batch operations use a quiet pipeline and preserve input order.
-    results = client.batch([Get("key"), Get("missing"), Set("other", b"x")])
+# Compute on miss, stampede-safe: one winner recomputes per key while other
+# readers share its result; refresh_ahead renews hot keys before they expire.
+report = cache.get("report:q3", factory=build_report, ttl=3600, refresh_ahead=300)
 
-    # C only transfers the value if it changed, in one round trip.
-    latest = client.get("key", unless_cas=result.item.cas)
-    if latest.status is GetStatus.UNCHANGED:
-        use_local_copy()
+# Soft invalidation: readers keep the old copy for the grace window while one
+# factory reader is elected to recompute. Hard delete is a full miss.
+cache.delete("article:7", grace=60)
 
-    # Atomic cache-miss lease. Only one caller receives GRANTED.
-    lease = client.get_with_lease("report", lease_ttl=30)
-    if lease.lease_state.name == "GRANTED":
-        lease.fulfill(build_report(), ttl=300)
+# Atomic read-modify-write: version handling and conflict retries live in the
+# library; fn must be pure because it can run more than once.
+cache.update("cart:42", lambda cart: cart + [item], default=[], ttl=1800)
+
+# Counters count from zero on a miss; ttl applies on create only, which is
+# exactly a fixed-window rate limit.
+if cache.incr(f"rate:{ip}", ttl=60) > 100:
+    raise TooManyRequests
+
+# Claim once, renew sessions, buffer events, take atomically.
+cache.add("job:daily:2026-08-17", "1", ttl=86400)   # -> bool, True when claimed
+cache.get("session:abc", extend_ttl=1800)           # read and slide expiry
+cache.replace("session:abc", session, ttl=1800)     # write back, never resurrects
+cache.append("events:1", b"login;", ttl=86400)      # byte-stream buffer
+buffered = cache.pop("events:1")                    # atomic take and delete
+
+# Independent operations in one round trip per server.
+with cache.pipeline() as p:
+    user = p.get("user:1")
+    hits = p.incr(f"rate:{ip}", ttl=60)
+    p.touch("session:abc", 1800)
+print(user.value, hits.value)
+
+# Non-intrusive probe for debugging: no value transfer, no LRU bump.
+info = cache.inspect("report:q3")   # -> ItemInfo(ttl, size, last_access, hit_before) | None
 ```
 
-`AsyncMetaClient` has the same concepts and call shape; its methods and lease `fulfill()` are awaited.
+`AsyncMemcache` is the same table of verbs plus `await`; `factory` and `fn` accept sync or async callables. Used as an async context manager, refresh-ahead and stale-grace recomputations run as background tasks owned by the client, so no request pays the refresh latency.
 
-Failures never arrive silently. A single operation has nowhere to put "I never got an answer", so infrastructure trouble (a refused connection, a timeout, a malformed response, a value that will not deserialize) raises `OperationFailedError` with the original cause attached, and a write that was sent but never acknowledged raises `AmbiguousWriteError`. Semantic outcomes such as a miss, an `add` on a taken key or a CAS mismatch are real answers, so they stay in the returned status where you can branch on them. Call `check()` when success is the only outcome you accept:
+Failure behavior is a constructor policy, not a per-call decision. The default `on_error="raise"` surfaces infrastructure trouble as `OperationFailedError` (a sent-but-unacknowledged write raises `AmbiguousWriteError`, and that never degrades). `on_error="degrade"` decouples a cache outage from a site outage: reads become misses, a `get` with a factory computes locally, blind writes are dropped silently, while operations whose answer feeds business decisions (`add`, `replace`, `incr`, `update`, `pop`) still raise. Every absorbed failure goes to the `on_failure` hook (standard logging by default), so degrading business behavior never degrades observability.
 
-```python
-    client.add("lock", token, ttl=30).check()   # raises AlreadyExistsError if taken
-    client.cas("key", value, token).check()     # raises CasMismatchError if it moved
-    value = client.get("key").check().value
-```
-
-A batch does have somewhere to put per-operation failure, so one unreachable server spoils only its own operations and the rest of the results stand. Inspect them with `results.failures`, or opt the whole batch into raising with `results.raise_for_failures()`.
-
-For protocol experts, `client.meta` maps the wire commands one-to-one (`get`/`set`/`delete`/`arithmetic`/`debug`, i.e. `mg`/`ms`/`md`/`ma`/`me`) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping:
+For protocol experts, `cache.meta` maps the wire commands one-to-one (`get`/`set`/`delete`/`arithmetic`/`debug`, i.e. `mg`/`ms`/`md`/`ma`/`me`) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping:
 
 ```python
-    stored = client.meta.set("key", b"payload", ttl=60, return_cas=True, opaque=b"req1")
-    got = client.meta.get("key", return_cas=True, return_ttl=True)
+    stored = cache.meta.set("key", b"payload", ttl=60, return_cas=True, opaque=b"req1")
+    got = cache.meta.get("key", return_cas=True, return_ttl=True)
     assert got.rc == b"VA" and got.cas == stored.cas
 
     # Framing-safe bytes-level escape hatch for anything not covered above.
-    client.meta.execute(command="mg", key="key", flags=[b"v", b"t"])
+    cache.meta.execute(command="mg", key="key", flags=[b"v", b"t"])
 ```
+
+See `examples/scenario_demo.py` for a runnable tour of every scenario, and `docs/design-scenario-api.md` for the design rationale.
 
 ## About the Project
 

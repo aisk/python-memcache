@@ -26,39 +26,40 @@ Core client
    :members:
    :undoc-members:
 
-Meta client (experimental)
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Scenario client (experimental)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. note::
 
-   ``MetaClient`` and ``AsyncMetaClient`` live under ``memcache.experiment`` and their API may change in any minor release. If you depend on them, pin the minor version in your dependency spec (e.g. ``memcache~=0.14.0``).
+   ``Memcache`` and ``AsyncMemcache`` under ``memcache.experiment`` may change in any minor release. If you depend on them, pin the minor version in your dependency spec (e.g. ``memcache~=0.14.0``).
 
-``MetaClient`` is a high-level client for memcached's meta protocol. The core methods (``get``/``set``/``delete``/``increment``/``batch``) cover the full protocol surface, while convenience wrappers such as ``add``, ``cas``, ``invalidate`` and ``get_with_lease`` package common usage patterns with safer defaults. Every result has an explicit status.
-
-.. code-block:: python
-
-   from memcache.experiment import Field, Get, GetStatus, MetaClient, Set
-
-   with MetaClient(("localhost", 11211)) as client:
-       client.set("key", {"message": "value"}, ttl=60)
-
-       result = client.get("key", fields=Field.CAS | Field.TTL | Field.SIZE)
-       if result.status is GetStatus.HIT:
-           print(result.value, result.item.cas, result.item.ttl)
-
-``AsyncMetaClient`` has the same concepts and call shape; its methods and lease ``fulfill()`` are awaited.
-
-Failures never arrive silently. A single operation has nowhere to put "I never got an answer", so infrastructure trouble (a refused connection, a timeout, a malformed response, a value that will not deserialize) raises ``OperationFailedError`` with the original cause attached, and a write that was sent but never acknowledged raises ``AmbiguousWriteError``. Semantic outcomes such as a miss, an ``add`` on a taken key or a CAS mismatch are real answers, so they stay in the returned status where you can branch on them. Call ``check()`` when success is the only outcome you accept:
+``memcache.experiment.Memcache`` is a scenario-level client built on memcached's meta protocol: one method per usage scenario, business values in and out. Reads answer a miss with a default instead of an error, failures leave through exceptions, and protocol concepts (CAS tokens, lease flags, stale markers) never appear in caller code. Policies such as the serializer, a key prefix, and the failure behavior live in the constructor; every write states its lifetime (``FOREVER`` for no expiry).
 
 .. code-block:: python
 
-       client.add("lock", token, ttl=30).check()   # raises AlreadyExistsError if taken
-       client.cas("key", value, token).check()     # raises CasMismatchError if it moved
-       value = client.get("key").check().value
+   from memcache.experiment import Memcache, JsonSerializer
 
-A batch does have somewhere to put per-operation failure, so one unreachable server spoils only its own operations and the rest of the results stand. Inspect them with ``results.failures``, or opt the whole batch into raising with ``results.raise_for_failures()``.
+   with Memcache(("localhost", 11211), serializer=JsonSerializer()) as cache:
+       cache.set("user:1", {"name": "alice"}, ttl=600)
+       user = cache.get("user:1")
 
-For protocol experts, ``client.meta`` maps the wire commands one-to-one (``mg``/``ms``/``md``/``ma``/``me``) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping.
+       # Compute on miss, stampede-safe: one winner recomputes per key.
+       report = cache.get("report:q3", factory=build_report, ttl=3600)
+
+       # Atomic read-modify-write; conflict retries live in the library.
+       cache.update("cart:42", lambda cart: cart + [item], default=[], ttl=1800)
+
+       # Independent operations in one round trip per server.
+       with cache.pipeline() as p:
+           user = p.get("user:1")
+           hits = p.incr("rate:ip", ttl=60)
+       print(user.value, hits.value)
+
+``AsyncMemcache`` is the same table of verbs plus ``await``; ``factory`` and ``fn`` accept sync or async callables, and refresh-ahead recomputations run as background tasks when the client is used as an async context manager.
+
+Failure behavior is a constructor policy. The default ``on_error="raise"`` surfaces infrastructure trouble as ``OperationFailedError`` (a sent-but-unacknowledged write raises ``AmbiguousWriteError``, and that never degrades). ``on_error="degrade"`` decouples a cache outage from a site outage: reads become misses, a ``get`` with a factory computes locally, blind writes are dropped silently, while operations whose answer feeds business decisions (``add``, ``replace``, ``incr``, ``update``, ``pop``) still raise. Absorbed failures go to the ``on_failure`` hook.
+
+For protocol experts, ``cache.meta`` maps the wire commands one-to-one (``mg``/``ms``/``md``/``ma``/``me``) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping. See ``docs/design-scenario-api.md`` for the design rationale.
 
 .. automodule:: memcache.experiment
    :members:

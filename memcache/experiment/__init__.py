@@ -1,12 +1,22 @@
+"""Experimental scenario-level client API.
+
+Two layers only: the scenario layer (:class:`Memcache` /
+:class:`AsyncMemcache`, one door per usage scenario, business values in and
+out) and the protocol layer (``cache.meta``, a 1:1 typed surface over the
+meta protocol plus a raw ``execute`` escape hatch). Everything under
+``memcache.experiment`` may change in any release.
+"""
+
 from ..errors import (
-    AlreadyExistsError,
     AmbiguousWriteError,
-    CasMismatchError,
+    ConflictError,
+    MemcacheError,
     NotFoundError,
     OperationFailedError,
     ProtocolError,
     SerializeError,
 )
+from ..meta_command import MetaCommand, MetaResult
 from ..serialize import (
     CompressedSerializer,
     JsonSerializer,
@@ -14,55 +24,40 @@ from ..serialize import (
     Serializer,
     StrictSerializer,
 )
-from .async_meta_client import AsyncMetaClient
-from .meta_api import MetaCommandResult
-from .meta_client import MetaClient
-from .operation import Arithmetic, Delete, Get, Set
-from .result import (
-    ArithmeticResult,
-    BatchResult,
-    Field,
-    GetResult,
-    GetStatus,
-    ItemFields,
-    LeaseResult,
-    LeaseState,
-    MutationResult,
-    MutationStatus,
-    ResultValueError,
-    ValueState,
+from .async_client import AsyncMemcache, AsyncMetaNamespace, AsyncPipeline
+from .client import (
+    FOREVER,
+    Deferred,
+    ItemInfo,
+    Memcache,
+    MetaNamespace,
+    Pipeline,
 )
+from .meta_api import MetaCommandResult
 
 __all__ = [
-    "AlreadyExistsError",
     "AmbiguousWriteError",
-    "Arithmetic",
-    "ArithmeticResult",
-    "AsyncMetaClient",
-    "BatchResult",
-    "CasMismatchError",
+    "AsyncMemcache",
+    "AsyncMetaNamespace",
+    "AsyncPipeline",
     "CompressedSerializer",
-    "Delete",
-    "Field",
-    "Get",
-    "GetResult",
-    "GetStatus",
-    "ItemFields",
+    "ConflictError",
+    "Deferred",
+    "FOREVER",
+    "ItemInfo",
     "JsonSerializer",
-    "LeaseResult",
-    "LeaseState",
-    "MetaClient",
+    "Memcache",
+    "MemcacheError",
+    "MetaCommand",
     "MetaCommandResult",
-    "MutationResult",
-    "MutationStatus",
+    "MetaNamespace",
+    "MetaResult",
     "NotFoundError",
     "OperationFailedError",
     "PickleSerializer",
+    "Pipeline",
     "ProtocolError",
-    "ResultValueError",
     "SerializeError",
     "Serializer",
-    "Set",
     "StrictSerializer",
-    "ValueState",
 ]

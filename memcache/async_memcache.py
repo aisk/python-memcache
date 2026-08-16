@@ -3,9 +3,10 @@ from typing import Any
 from .async_connection import AsyncConnection  # noqa: F401 re-export
 from .connection import Addr
 from .errors import CasMismatchError, MemcacheError
-from .experiment import Field, Get
-from .experiment.async_meta_client import AsyncMetaClient
-from .experiment.result import GetStatus, MutationStatus
+from .experiment._core import WireOp, settle
+from .experiment.async_client import AsyncMemcache as _ScenarioAsyncMemcache
+from .experiment.meta_api import MetaCommandResult, build_get
+from .memcache import _server_list
 from .meta_command import MetaCommand, MetaResult
 from .serialize import dump, load, DumpFunc, FuncSerializer, LoadFunc
 
@@ -51,14 +52,17 @@ class AsyncMemcache:
         username: str | None = None,
         password: str | None = None,
     ):
-        self._meta = AsyncMetaClient(
-            addr,
+        servers = _server_list(addr)
+        self._serializer = FuncSerializer(dump_func, load_func)
+        self._client = _ScenarioAsyncMemcache(
+            *servers,
+            serializer=self._serializer,
             max_idle=max_idle,
             timeout=timeout,
-            serializer=FuncSerializer(dump_func, load_func),
             username=username,
             password=password,
         )
+        self._meta = self._client.meta
 
     async def __aenter__(self) -> "AsyncMemcache":
         return self
@@ -67,22 +71,28 @@ class AsyncMemcache:
         await self.close()
 
     async def close(self) -> None:
-        await self._meta.close()
+        await self._client.close()
 
     async def execute_meta_command(self, command: MetaCommand) -> MetaResult:
-        return await self._meta.execute_meta_command(command)
+        return await self._client._execute_meta(command)
 
     async def flush_all(self) -> None:
-        await self._meta.flush_all()
+        await self._client.flush_all()
 
     async def set(
         self, key: bytes | str, value: Any, *, expire: int | None = None
     ) -> None:
-        await self._meta.set(key, value, ttl=expire)
+        raw, flags = self._serializer.dump(key, value)
+        await self._meta.set(key, raw, client_flags=flags, ttl=expire)
+
+    def _load_hit(self, key: bytes | str, result: MetaCommandResult) -> Any:
+        return self._serializer.load(key, result.value or b"", result.client_flags or 0)
 
     async def get(self, key: bytes | str) -> Any | None:
-        r = await self._meta.get(key)
-        return r.value if r.status is GetStatus.HIT else None
+        result = await self._meta.get(key, return_client_flags=True)
+        if result.rc != b"VA":
+            return None
+        return self._load_hit(key, result)
 
     async def gets(self, key: bytes | str) -> tuple[Any, int] | None:
         """
@@ -91,12 +101,12 @@ class AsyncMemcache:
         :param key: The key to retrieve
         :return: A tuple of (value, cas_token) or None if key doesn't exist
         """
-        r = await self._meta.get(key, fields=Field.CAS)
-        if r.status is not GetStatus.HIT:
+        result = await self._meta.get(key, return_client_flags=True, return_cas=True)
+        if result.rc != b"VA":
             return None
-        if r.cas_token is None:
+        if result.cas is None:
             raise MemcacheError("CAS token not found in response")
-        return r.value, r.cas_token
+        return self._load_hit(key, result), result.cas
 
     async def cas(
         self,
@@ -116,44 +126,50 @@ class AsyncMemcache:
         :raises CasMismatchError: If the item changed since the CAS token was read
         :raises MemcacheError: If the key doesn't exist or the operation fails
         """
-        result = await self._meta.cas(key, value, cas_token, ttl=expire)
-        if result.status is MutationStatus.CAS_MISMATCH:
+        raw, flags = self._serializer.dump(key, value)
+        result = await self._meta.set(
+            key, raw, client_flags=flags, ttl=expire, compare_cas=cas_token
+        )
+        if result.rc == b"EX":
             raise CasMismatchError("CAS token mismatch")
-        if result.status is MutationStatus.NOT_FOUND:
+        if result.rc == b"NF":
             raise MemcacheError("key not found")
-        if result.status is not MutationStatus.STORED:
-            raise MemcacheError(
-                f"CAS operation failed: {result.status.name}"
-            ) from result.error
+        if not result.ok:
+            raise MemcacheError("CAS operation failed: %r" % result.rc)
 
     async def delete(self, key: bytes | str) -> bool:
-        return (await self._meta.delete(key)).status is MutationStatus.STORED
+        return (await self._meta.delete(key)).ok
 
     async def touch(self, key: bytes | str, expire: int) -> bool:
-        return (await self._meta.touch(key, expire)).status is MutationStatus.STORED
+        return (await self._meta.get(key, value=False, touch=expire)).ok
 
     async def add(
         self, key: bytes | str, value: Any, *, expire: int | None = None
     ) -> bool:
+        raw, flags = self._serializer.dump(key, value)
         return (
-            await self._meta.add(key, value, ttl=expire)
-        ).status is MutationStatus.STORED
+            await self._meta.set(key, raw, client_flags=flags, ttl=expire, mode="add")
+        ).ok
 
     async def replace(
         self, key: bytes | str, value: Any, *, expire: int | None = None
     ) -> bool:
-        result = await self._meta.set(key, value, ttl=expire, mode="replace")
-        return result.status is MutationStatus.STORED
+        raw, flags = self._serializer.dump(key, value)
+        return (
+            await self._meta.set(
+                key, raw, client_flags=flags, ttl=expire, mode="replace"
+            )
+        ).ok
 
     async def append(self, key: bytes | str, value: bytes | str) -> bool:
         if isinstance(value, str):
             value = value.encode()
-        return (await self._meta.append(key, value)).status is MutationStatus.STORED
+        return (await self._meta.set(key, value, mode="append")).ok
 
     async def prepend(self, key: bytes | str, value: bytes | str) -> bool:
         if isinstance(value, str):
             value = value.encode()
-        return (await self._meta.prepend(key, value)).status is MutationStatus.STORED
+        return (await self._meta.set(key, value, mode="prepend")).ok
 
     async def get_many(self, keys: list[bytes | str]) -> dict[bytes | str, Any]:
         """Read several keys at once, keyed by the key objects passed in.
@@ -161,29 +177,32 @@ class AsyncMemcache:
         A hit is reported under the very key the caller handed over, bytes or
         str, so the result stays indexable by whatever the caller already has.
         """
-        results = await self._meta.batch([Get(key) for key in keys])
-        return {r.key: r.value for r in results if r.status is GetStatus.HIT}
+        ops = [
+            WireOp(
+                build_get(key, value=True, return_client_flags=True),
+                side_effect=False,
+            )
+            for key in keys
+        ]
+        outcomes = await self._client._run_ops(ops)
+        found: dict[bytes | str, Any] = {}
+        for key, outcome in zip(keys, outcomes):
+            response = settle(key, outcome)
+            if response is not None and response.rc == b"VA":
+                found[key] = self._load_hit(key, response)
+        return found
+
+    async def _arithmetic(self, key: bytes | str, delta: int, decrement: bool) -> int:
+        result = await self._meta.arithmetic(key, delta=delta, decrement=decrement)
+        verb = "decrement" if decrement else "increment"
+        if result.rc == b"NF":
+            raise MemcacheError("key not found")
+        if result.rc != b"VA" or not result.value:
+            raise MemcacheError("%s failed: %r" % (verb, result.rc))
+        return int(result.value)
 
     async def incr(self, key: bytes | str, value: int = 1) -> int:
-        result = await self._meta.increment(key, value)
-        if result.status is MutationStatus.NOT_FOUND:
-            raise MemcacheError("key not found")
-        if result.status is not MutationStatus.STORED:
-            raise MemcacheError(
-                f"increment failed: {result.status.name}"
-            ) from result.error
-        if result.value is None:
-            raise MemcacheError("no value in increment response")
-        return result.value
+        return await self._arithmetic(key, value, False)
 
     async def decr(self, key: bytes | str, value: int = 1) -> int:
-        result = await self._meta.decrement(key, value)
-        if result.status is MutationStatus.NOT_FOUND:
-            raise MemcacheError("key not found")
-        if result.status is not MutationStatus.STORED:
-            raise MemcacheError(
-                f"decrement failed: {result.status.name}"
-            ) from result.error
-        if result.value is None:
-            raise MemcacheError("no value in decrement response")
-        return result.value
+        return await self._arithmetic(key, value, True)

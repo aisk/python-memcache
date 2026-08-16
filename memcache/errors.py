@@ -26,6 +26,15 @@ class AlreadyExistsError(MemcacheError):
     """An add-style write found the key already present."""
 
 
+class ConflictError(MemcacheError):
+    """An optimistic concurrency loop exhausted its retries.
+
+    Raised by ``update`` and ``pop`` when every attempt kept colliding with
+    concurrent writes to the same key. This signals abnormal contention, not
+    a normal answer; the item itself is fine.
+    """
+
+
 class OperationFailedError(MemcacheError):
     """An operation did not reach a usable answer from the server.
 

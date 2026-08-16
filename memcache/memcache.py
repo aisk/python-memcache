@@ -1,10 +1,10 @@
 from typing import Any
 
-from .connection import Addr, Connection  # re-export for backward compat
+from .connection import Addr, Connection  # noqa: F401 re-export for backward compat
 from .errors import CasMismatchError, MemcacheError
-from .experiment.meta_client import MetaClient
-from .experiment.operation import Get
-from .experiment.result import Field, GetStatus, MutationStatus
+from .experiment._core import WireOp, settle
+from .experiment.client import Memcache as _ScenarioMemcache
+from .experiment.meta_api import MetaCommandResult, build_get
 from .meta_command import MetaCommand, MetaResult
 from .serialize import dump, load, DumpFunc, FuncSerializer, LoadFunc
 
@@ -50,14 +50,17 @@ class Memcache:
         username: str | None = None,
         password: str | None = None,
     ):
-        self._meta = MetaClient(
-            addr,
+        servers = _server_list(addr)
+        self._serializer = FuncSerializer(dump_func, load_func)
+        self._client = _ScenarioMemcache(
+            *servers,
+            serializer=self._serializer,
             max_idle=max_idle,
             timeout=timeout,
-            serializer=FuncSerializer(dump_func, load_func),
             username=username,
             password=password,
         )
+        self._meta = self._client.meta
 
     def __enter__(self) -> "Memcache":
         return self
@@ -66,20 +69,26 @@ class Memcache:
         self.close()
 
     def close(self) -> None:
-        self._meta.close()
+        self._client.close()
 
     def execute_meta_command(self, command: MetaCommand) -> MetaResult:
-        return self._meta.execute_meta_command(command)
+        return self._client._execute_meta(command)
 
     def flush_all(self) -> None:
-        self._meta.flush_all()
+        self._client.flush_all()
 
     def set(self, key: bytes | str, value: Any, *, expire: int | None = None) -> None:
-        self._meta.set(key, value, ttl=expire)
+        raw, flags = self._serializer.dump(key, value)
+        self._meta.set(key, raw, client_flags=flags, ttl=expire)
+
+    def _load_hit(self, key: bytes | str, result: MetaCommandResult) -> Any:
+        return self._serializer.load(key, result.value or b"", result.client_flags or 0)
 
     def get(self, key: bytes | str) -> Any | None:
-        r = self._meta.get(key)
-        return r.value if r.status is GetStatus.HIT else None
+        result = self._meta.get(key, return_client_flags=True)
+        if result.rc != b"VA":
+            return None
+        return self._load_hit(key, result)
 
     def gets(self, key: bytes | str) -> tuple[Any, int] | None:
         """
@@ -88,12 +97,12 @@ class Memcache:
         :param key: The key to retrieve
         :return: A tuple of (value, cas_token) or None if key doesn't exist
         """
-        r = self._meta.get(key, fields=Field.CAS)
-        if r.status is not GetStatus.HIT:
+        result = self._meta.get(key, return_client_flags=True, return_cas=True)
+        if result.rc != b"VA":
             return None
-        if r.cas_token is None:
+        if result.cas is None:
             raise MemcacheError("CAS token not found in response")
-        return r.value, r.cas_token
+        return self._load_hit(key, result), result.cas
 
     def cas(
         self,
@@ -113,40 +122,44 @@ class Memcache:
         :raises CasMismatchError: If the item changed since the CAS token was read
         :raises MemcacheError: If the key doesn't exist or the operation fails
         """
-        result = self._meta.cas(key, value, cas_token, ttl=expire)
-        if result.status is MutationStatus.CAS_MISMATCH:
+        raw, flags = self._serializer.dump(key, value)
+        result = self._meta.set(
+            key, raw, client_flags=flags, ttl=expire, compare_cas=cas_token
+        )
+        if result.rc == b"EX":
             raise CasMismatchError("CAS token mismatch")
-        if result.status is MutationStatus.NOT_FOUND:
+        if result.rc == b"NF":
             raise MemcacheError("key not found")
-        if result.status is not MutationStatus.STORED:
-            raise MemcacheError(
-                f"CAS operation failed: {result.status.name}"
-            ) from result.error
+        if not result.ok:
+            raise MemcacheError("CAS operation failed: %r" % result.rc)
 
     def delete(self, key: bytes | str) -> bool:
-        return self._meta.delete(key).status is MutationStatus.STORED
+        return self._meta.delete(key).ok
 
     def touch(self, key: bytes | str, expire: int) -> bool:
-        return self._meta.touch(key, expire).status is MutationStatus.STORED
+        return self._meta.get(key, value=False, touch=expire).ok
 
     def add(self, key: bytes | str, value: Any, *, expire: int | None = None) -> bool:
-        return self._meta.add(key, value, ttl=expire).status is MutationStatus.STORED
+        raw, flags = self._serializer.dump(key, value)
+        return self._meta.set(key, raw, client_flags=flags, ttl=expire, mode="add").ok
 
     def replace(
         self, key: bytes | str, value: Any, *, expire: int | None = None
     ) -> bool:
-        result = self._meta.set(key, value, ttl=expire, mode="replace")
-        return result.status is MutationStatus.STORED
+        raw, flags = self._serializer.dump(key, value)
+        return self._meta.set(
+            key, raw, client_flags=flags, ttl=expire, mode="replace"
+        ).ok
 
     def append(self, key: bytes | str, value: bytes | str) -> bool:
         if isinstance(value, str):
             value = value.encode()
-        return self._meta.append(key, value).status is MutationStatus.STORED
+        return self._meta.set(key, value, mode="append").ok
 
     def prepend(self, key: bytes | str, value: bytes | str) -> bool:
         if isinstance(value, str):
             value = value.encode()
-        return self._meta.prepend(key, value).status is MutationStatus.STORED
+        return self._meta.set(key, value, mode="prepend").ok
 
     def get_many(self, keys: list[bytes | str]) -> dict[bytes | str, Any]:
         """Read several keys at once, keyed by the key objects passed in.
@@ -154,29 +167,42 @@ class Memcache:
         A hit is reported under the very key the caller handed over, bytes or
         str, so the result stays indexable by whatever the caller already has.
         """
-        results = self._meta.batch([Get(key) for key in keys])
-        return {r.key: r.value for r in results if r.status is GetStatus.HIT}
+        ops = [
+            WireOp(
+                build_get(key, value=True, return_client_flags=True),
+                side_effect=False,
+            )
+            for key in keys
+        ]
+        outcomes = self._client._run_ops(ops)
+        found: dict[bytes | str, Any] = {}
+        for key, outcome in zip(keys, outcomes):
+            response = settle(key, outcome)
+            if response is not None and response.rc == b"VA":
+                found[key] = self._load_hit(key, response)
+        return found
+
+    def _arithmetic(self, key: bytes | str, delta: int, decrement: bool) -> int:
+        result = self._meta.arithmetic(key, delta=delta, decrement=decrement)
+        verb = "decrement" if decrement else "increment"
+        if result.rc == b"NF":
+            raise MemcacheError("key not found")
+        if result.rc != b"VA" or not result.value:
+            raise MemcacheError("%s failed: %r" % (verb, result.rc))
+        return int(result.value)
 
     def incr(self, key: bytes | str, value: int = 1) -> int:
-        result = self._meta.increment(key, value)
-        if result.status is MutationStatus.NOT_FOUND:
-            raise MemcacheError("key not found")
-        if result.status is not MutationStatus.STORED:
-            raise MemcacheError(
-                f"increment failed: {result.status.name}"
-            ) from result.error
-        if result.value is None:
-            raise MemcacheError("no value in increment response")
-        return result.value
+        return self._arithmetic(key, value, False)
 
     def decr(self, key: bytes | str, value: int = 1) -> int:
-        result = self._meta.decrement(key, value)
-        if result.status is MutationStatus.NOT_FOUND:
-            raise MemcacheError("key not found")
-        if result.status is not MutationStatus.STORED:
-            raise MemcacheError(
-                f"decrement failed: {result.status.name}"
-            ) from result.error
-        if result.value is None:
-            raise MemcacheError("no value in decrement response")
-        return result.value
+        return self._arithmetic(key, value, True)
+
+
+def _server_list(addr: Addr | list[Addr] | None) -> list[Addr]:
+    if addr is None:
+        return []
+    if isinstance(addr, tuple):
+        return [addr]
+    if isinstance(addr, list) and addr:
+        return list(addr)
+    raise TypeError("addr must be a server tuple or a non-empty list")

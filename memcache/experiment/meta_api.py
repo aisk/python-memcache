@@ -22,8 +22,8 @@ from collections.abc import Iterable
 
 from ..errors import ProtocolError
 from ..meta_command import MetaCommand, MetaResult, encode_key
-from .result import Key
 
+Key = str | bytes
 Token = bytes | str | int
 
 _OPAQUE_MAX = 32
