@@ -63,16 +63,6 @@ Async usage mirrors the sync API with `AsyncMemcache` and `await`.
 
 `memcache.experiment.Memcache` hides the wire protocol behind verbs named for what you are doing. The meta protocol's CAS tokens and leases never surface in caller code. Instead of reading a version and writing it back, call `update` with a transform function and the client runs the read, compare and swap, retry loop internally. Instead of building dogpile protection, call `get` with a `factory` and the client makes sure the value is computed once. When you do need the raw protocol, every meta command is still reachable through `cache.meta`.
 
-### Conventions
-
-- A miss is a normal answer, not an error. Reads return `default` (usually `None`) on a miss; exceptions are reserved for infrastructure failure. The two never mix.
-- Values are business objects. The serializer is a constructor policy. The default `StrictSerializer` stores only bytes, int and str; `PickleSerializer` and `JsonSerializer` handle arbitrary objects, and `CompressedSerializer` wraps any of them.
-- Keys are str or bytes, and both spellings name the same item. The constructor `prefix` namespaces every key, which also makes it a whole-cache version switch.
-- Every method that stores a value takes a required `ttl`, with no client wide default. An int or `timedelta` is a duration from now, an aware `datetime` is the absolute moment of expiry, and `FOREVER` (0) stores without expiration, spelling that choice out at the call site. A negative duration, a naive datetime or a moment already in the past is an error. `grace` and `extend_ttl` accept the same forms. `refresh_ahead` is a window length and takes an int or `timedelta`.
-- On verbs that auto create the key (`incr`, `decr`, `append`, `prepend`) the ttl applies only when the call creates the key. It never extends an existing key's lifetime.
-- Parameter constraints fail loudly at the call site instead of being silently ignored. `ttl` and `refresh_ahead` require `factory`, `factory` requires `ttl`, and `extend_ttl` cannot be combined with `factory`.
-- Empty serialized values are rejected, because memcached represents lease placeholders as zero byte items.
-
 ### Creating a client
 
 ```python
@@ -95,6 +85,14 @@ cache = Memcache(("cache1", 11211), ("cache2", 11211), serializer=JsonSerializer
 
 With multiple servers, keys are distributed by consistent hashing. Each server has an elastic connection pool; `max_idle` limits retained idle connections, not active requests. The client is a context manager and `close()` releases every connection.
 
+Keys are str or bytes, and both spellings name the same item. The constructor `prefix` namespaces every key, which also makes it a whole-cache version switch.
+
+### Serialization
+
+Values are business objects and the serializer is a constructor policy. The default `StrictSerializer` stores only bytes, int and str; `PickleSerializer` and `JsonSerializer` handle arbitrary objects, and `CompressedSerializer` wraps any of them.
+
+Empty serialized values are rejected, because memcached represents lease placeholders as zero byte items.
+
 ### Reading
 
 ```python
@@ -103,7 +101,7 @@ cache.get_many(keys)                    # -> {key: value}, hits only
 cache.inspect(key)                      # -> ItemInfo | None
 ```
 
-`get` reads one value; a miss returns `default`.
+`get` reads one value. A miss is a normal answer, not an error: it returns `default` (`None` by default), and exceptions are reserved for infrastructure failure. The two never mix.
 
 ```python
 user = cache.get(f"user:{uid}")
@@ -138,6 +136,8 @@ cache.delete_many(keys)                 # -> None
 
 `set` unconditionally stores a value for `ttl`. `set_many` stores a batch in one round trip per backend, all sharing the same ttl.
 
+Every storing method takes a required `ttl`, with no client wide default. An int or `timedelta` is a duration from now, an aware `datetime` is the absolute moment of expiry, and `FOREVER` (0) stores without expiration, spelling that choice out at the call site. A negative duration, a naive datetime or a moment already in the past is an error. `grace` and `extend_ttl` accept the same forms, and `refresh_ahead` is a window length that takes an int or `timedelta`.
+
 `add` stores only when the key is absent and reports whether this caller won, which makes it a simple once-only guard for multi-instance deployments:
 
 ```python
@@ -168,7 +168,7 @@ During the grace window plain readers keep getting the old copy, while a factory
 cache.get(key, factory=build, ttl=3600, refresh_ahead=0)   # -> value
 ```
 
-The highest frequency cache pattern as one modifier: `default` is the static fallback for a miss, `factory` is the computing one that also writes the result back.
+The highest frequency cache pattern as one modifier: `default` is the static fallback for a miss, `factory` is the computing one that also writes the result back. The parameters form one cluster: `factory` requires `ttl`, `ttl` and `refresh_ahead` are only meaningful with `factory`, and `extend_ttl` cannot be combined with `factory`. A wrong combination raises at the call site instead of being silently ignored.
 
 ```python
 report = cache.get("report:q3", factory=build_report, ttl=3600)
@@ -216,7 +216,7 @@ cache.prepend(key, fragment, ttl)   # -> None
 cache.pop(key, default=None)        # -> value, atomic take and delete
 ```
 
-`append` and `prepend` concatenate raw bytes (or str) onto a value, creating it on a miss; they bypass the serializer because this key family's value model is a delimited byte stream, not an object. `pop` atomically reads a value and deletes it, with no window in which concurrently appended bytes can be lost. Together they make a collect then drain pattern, such as buffering events per user and periodically taking the batch:
+`append` and `prepend` concatenate raw bytes (or str) onto a value, creating it on a miss; the ttl applies only to that creation, so later calls never extend the buffer's life. They bypass the serializer because this key family's value model is a delimited byte stream, not an object. `pop` atomically reads a value and deletes it, with no window in which concurrently appended bytes can be lost. Together they make a collect then drain pattern, such as buffering events per user and periodically taking the batch:
 
 ```python
 cache.append(f"events:{uid}", b"login;", ttl=86400)
@@ -281,7 +281,7 @@ See `examples/scenario_demo.py` for a runnable tour of the whole API.
 
 ## About the Project
 
-Memcache is &copy; 2020-2025 by [aisk](https://github.com/aisk).
+Memcache is &copy; 2020-2026 by [aisk](https://github.com/aisk).
 
 ### License
 

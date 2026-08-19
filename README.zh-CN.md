@@ -60,16 +60,6 @@ client.cas("key", "new_value", token)
 
 `memcache.experiment.Memcache` 把底层协议屏蔽在以使用场景命名的方法后面，meta 协议里的 CAS 和 lease 永远不会出现在调用方代码中。不必自己读出版本号再写回去，调用 `update` 传入一个变换函数，客户端在内部完成读取、比较交换、重试的循环。也不必自己实现防击穿，给 `get` 传一个 `factory`，客户端保证值只被计算一次。确实需要原始协议时，所有 meta 命令仍然可以通过 `cache.meta` 访问。
 
-### 通用规则
-
-- 未命中是正常的回答，不是错误。读操作在未命中时返回 `default`（通常是 `None`），异常只用来表达基础设施故障，两者永不混淆。
-- 值是业务对象，序列化器是构造器级的策略。默认的 `StrictSerializer` 只存 bytes、int 和 str；`PickleSerializer` 和 `JsonSerializer` 处理任意对象，`CompressedSerializer` 可以包装它们中的任何一个。
-- key 可以是 str 或 bytes，两种写法指向同一个条目。构造器的 `prefix` 给所有 key 加上命名空间，同时也是整个缓存的版本开关。
-- 每个写入值的方法都要求提供 `ttl`，客户端没有全局默认值。int 或 `timedelta` 表示从现在起的时长，带时区的 `datetime` 表示过期的绝对时刻，`FOREVER`（0）表示永不过期，让这个选择在调用处一目了然。负的时长、没有时区的 datetime、已经过去的时刻都是错误。`grace` 和 `extend_ttl` 接受同样的形式，`refresh_ahead` 是窗口长度，接受 int 或 `timedelta`。
-- 在会自动创建 key 的方法上（`incr`、`decr`、`append`、`prepend`），ttl 只在这次调用创建了 key 时生效，永远不会延长已存在 key 的寿命。
-- 参数之间的约束在调用处大声报错而不是被静默忽略。`ttl` 和 `refresh_ahead` 依赖 `factory`，`factory` 又要求提供 `ttl`，`extend_ttl` 不能与 `factory` 同时使用。
-- 序列化结果为空的值会被拒绝，因为 memcached 用零字节条目表示 lease 占位符。
-
 ### 创建客户端
 
 ```python
@@ -92,6 +82,14 @@ cache = Memcache(("cache1", 11211), ("cache2", 11211), serializer=JsonSerializer
 
 多服务器时，key 通过一致性哈希分布。每个服务器有一个弹性连接池，`max_idle` 限制保留的空闲连接数而不是活跃请求数。客户端本身是上下文管理器，`close()` 释放所有连接。
 
+key 可以是 str 或 bytes，两种写法指向同一个条目。构造器的 `prefix` 给所有 key 加上命名空间，同时也是整个缓存的版本开关。
+
+### 序列化
+
+值是业务对象，序列化器是构造器级的策略。默认的 `StrictSerializer` 只存 bytes、int 和 str；`PickleSerializer` 和 `JsonSerializer` 处理任意对象，`CompressedSerializer` 可以包装它们中的任何一个。
+
+序列化结果为空的值会被拒绝，因为 memcached 用零字节条目表示 lease 占位符。
+
 ### 读取
 
 ```python
@@ -100,7 +98,7 @@ cache.get_many(keys)                    # -> {key: value}, hits only
 cache.inspect(key)                      # -> ItemInfo | None
 ```
 
-`get` 读取一个值，未命中返回 `default`。
+`get` 读取一个值。未命中是正常的回答，不是错误：它返回 `default`（默认值为 `None`），异常只用来表达基础设施故障，两者永不混淆。
 
 ```python
 user = cache.get(f"user:{uid}")
@@ -135,6 +133,8 @@ cache.delete_many(keys)                 # -> None
 
 `set` 无条件存储一个值，有效期为 `ttl`。`set_many` 对每个后端一次往返批量存储，所有值共享同一个 ttl。
 
+每个写入值的方法都要求提供 `ttl`，客户端没有全局默认值。int 或 `timedelta` 表示从现在起的时长，带时区的 `datetime` 表示过期的绝对时刻，`FOREVER`（0）表示永不过期，让这个选择在调用处一目了然。负的时长、没有时区的 datetime、已经过去的时刻都是错误。`grace` 和 `extend_ttl` 接受同样的形式，`refresh_ahead` 是窗口长度，接受 int 或 `timedelta`。
+
 `add` 只在 key 不存在时存储，并报告本次调用是否抢到，可以直接当作多实例部署下只执行一次的保护：
 
 ```python
@@ -165,7 +165,7 @@ cache.delete(f"article:{aid}", grace=60)   # soft: readers keep the old copy bri
 cache.get(key, factory=build, ttl=3600, refresh_ahead=0)   # -> value
 ```
 
-最高频的缓存场景收拢为一个修饰符：`default` 是未命中时的静态兜底，`factory` 是会计算并写回的兜底。
+最高频的缓存场景收拢为一个修饰符：`default` 是未命中时的静态兜底，`factory` 是会计算并写回的兜底。这组参数是一个整体：`factory` 要求提供 `ttl`，`ttl` 和 `refresh_ahead` 只在有 `factory` 时才有意义，`extend_ttl` 不能与 `factory` 同时使用。错误的组合在调用处直接报错，而不是被静默忽略。
 
 ```python
 report = cache.get("report:q3", factory=build_report, ttl=3600)
@@ -213,7 +213,7 @@ cache.prepend(key, fragment, ttl)   # -> None
 cache.pop(key, default=None)        # -> value, atomic take and delete
 ```
 
-`append` 和 `prepend` 把原始字节（或 str）拼接到值的尾部或头部，未命中时创建值。它们绕过序列化器，因为这类 key 的值模型是带分隔符的字节流而不是对象。`pop` 原子地读出一个值并删除它，不存在并发追加的字节被丢失的窗口。两者合起来构成收集再取走的模式，比如按用户缓冲事件并定期取走一批：
+`append` 和 `prepend` 把原始字节（或 str）拼接到值的尾部或头部，未命中时创建值，ttl 只在这次创建时生效，之后的调用不会延长缓冲区的寿命。它们绕过序列化器，因为这类 key 的值模型是带分隔符的字节流而不是对象。`pop` 原子地读出一个值并删除它，不存在并发追加的字节被丢失的窗口。两者合起来构成收集再取走的模式，比如按用户缓冲事件并定期取走一批：
 
 ```python
 cache.append(f"events:{uid}", b"login;", ttl=86400)
@@ -278,7 +278,7 @@ cache.meta.execute(command="mg", key="key", flags=[b"v", b"t"])
 
 ## 关于项目
 
-Memcache 版权归 [aisk](https://github.com/aisk) 所有（2020-2025）。
+Memcache 版权归 [aisk](https://github.com/aisk) 所有（2020-2026）。
 
 ### 许可证
 
