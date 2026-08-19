@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from inspect import isawaitable
 from typing import Any, cast
 from collections.abc import (
@@ -49,6 +50,7 @@ from ._core import (
     Key,
     ReadView,
     ScenarioBase,
+    Ttl,
     WireOp,
     WireOutcome,
     dump_value,
@@ -427,35 +429,35 @@ class AsyncPipeline:
                 deferred._error = error
 
     def get(
-        self, key: Key, default: Any = None, *, extend_ttl: int | None = None
+        self, key: Key, default: Any = None, *, extend_ttl: Ttl | None = None
     ) -> Deferred:
         return self._push(self._client._call_get(key, default, extend_ttl))
 
-    def set(self, key: Key, value: Any, ttl: int) -> Deferred:
+    def set(self, key: Key, value: Any, ttl: Ttl) -> Deferred:
         return self._push(self._client._call_set(key, value, ttl))
 
-    def delete(self, key: Key, grace: int = 0) -> Deferred:
+    def delete(self, key: Key, grace: Ttl = 0) -> Deferred:
         return self._push(self._client._call_delete(key, grace))
 
-    def add(self, key: Key, value: Any, ttl: int) -> Deferred:
+    def add(self, key: Key, value: Any, ttl: Ttl) -> Deferred:
         return self._push(self._client._call_store_if(key, value, ttl, "add"))
 
-    def replace(self, key: Key, value: Any, ttl: int) -> Deferred:
+    def replace(self, key: Key, value: Any, ttl: Ttl) -> Deferred:
         return self._push(self._client._call_store_if(key, value, ttl, "replace"))
 
-    def incr(self, key: Key, delta: int = 1, *, ttl: int) -> Deferred:
+    def incr(self, key: Key, delta: int = 1, *, ttl: Ttl) -> Deferred:
         return self._push(self._client._call_counter(key, delta, False, ttl))
 
-    def decr(self, key: Key, delta: int = 1, *, ttl: int) -> Deferred:
+    def decr(self, key: Key, delta: int = 1, *, ttl: Ttl) -> Deferred:
         return self._push(self._client._call_counter(key, delta, True, ttl))
 
-    def touch(self, key: Key, ttl: int) -> Deferred:
+    def touch(self, key: Key, ttl: Ttl) -> Deferred:
         return self._push(self._client._call_touch(key, ttl))
 
-    def append(self, key: Key, fragment: Any, ttl: int) -> Deferred:
+    def append(self, key: Key, fragment: Any, ttl: Ttl) -> Deferred:
         return self._push(self._client._call_concat(key, fragment, ttl, "append"))
 
-    def prepend(self, key: Key, fragment: Any, ttl: int) -> Deferred:
+    def prepend(self, key: Key, fragment: Any, ttl: Ttl) -> Deferred:
         return self._push(self._client._call_concat(key, fragment, ttl, "prepend"))
 
     def inspect(self, key: Key) -> Deferred:
@@ -626,9 +628,9 @@ class AsyncMemcache(ScenarioBase):
         default: Any = None,
         *,
         factory: Callable[[], Any] | None = None,
-        ttl: int | None = None,
-        refresh_ahead: int | None = None,
-        extend_ttl: int | None = None,
+        ttl: Ttl | None = None,
+        refresh_ahead: int | timedelta | None = None,
+        extend_ttl: Ttl | None = None,
     ) -> Any:
         """Read a value; a miss returns ``default``.
 
@@ -646,12 +648,14 @@ class AsyncMemcache(ScenarioBase):
     # ------------------------------------------------------------------
     # writing and invalidation (S1/S5)
 
-    async def set(self, key: Key, value: Any, ttl: int) -> None:
-        """Store a value for ``ttl`` seconds (:data:`FOREVER` for no expiry)."""
+    async def set(self, key: Key, value: Any, ttl: Ttl) -> None:
+        """Store a value for ``ttl``: seconds, a timedelta, or an aware
+        datetime for the absolute moment of expiry (:data:`FOREVER` for no
+        expiry). Every lifetime parameter accepts the same forms."""
         self._check_open()
         await self._run_call(self._call_set(key, value, ttl))
 
-    async def delete(self, key: Key, grace: int = 0) -> bool:
+    async def delete(self, key: Key, grace: Ttl = 0) -> bool:
         """Invalidate a key; see :meth:`memcache.experiment.Memcache.delete`."""
         self._check_open()
         return cast(bool, await self._run_call(self._call_delete(key, grace)))
@@ -671,7 +675,7 @@ class AsyncMemcache(ScenarioBase):
                 found[call.key] = value
         return found
 
-    async def set_many(self, mapping: Mapping[Key, Any], ttl: int) -> None:
+    async def set_many(self, mapping: Mapping[Key, Any], ttl: Ttl) -> None:
         """Store many values in one round trip per server."""
         self._check_open()
         calls = [self._call_set(key, value, ttl) for key, value in mapping.items()]
@@ -704,7 +708,7 @@ class AsyncMemcache(ScenarioBase):
         fn: Callable[[Any], Any],
         *,
         default: Any = MISSING,
-        ttl: int,
+        ttl: Ttl,
     ) -> Any:
         """Atomically transform a value and store the result for ``ttl``.
 
@@ -775,12 +779,12 @@ class AsyncMemcache(ScenarioBase):
             "pop of key %r kept conflicting with concurrent writes" % (key,)
         )
 
-    async def append(self, key: Key, fragment: Any, ttl: int) -> None:
+    async def append(self, key: Key, fragment: Any, ttl: Ttl) -> None:
         """Append bytes to a byte-stream value, creating it on a miss."""
         self._check_open()
         await self._run_call(self._call_concat(key, fragment, ttl, "append"))
 
-    async def prepend(self, key: Key, fragment: Any, ttl: int) -> None:
+    async def prepend(self, key: Key, fragment: Any, ttl: Ttl) -> None:
         """Prepend bytes to a byte-stream value; see :meth:`append`."""
         self._check_open()
         await self._run_call(self._call_concat(key, fragment, ttl, "prepend"))
@@ -788,14 +792,14 @@ class AsyncMemcache(ScenarioBase):
     # ------------------------------------------------------------------
     # counters (S7)
 
-    async def incr(self, key: Key, delta: int = 1, *, ttl: int) -> int:
+    async def incr(self, key: Key, delta: int = 1, *, ttl: Ttl) -> int:
         """Atomically add ``delta``; a miss counts from zero."""
         self._check_open()
         return cast(
             int, await self._run_call(self._call_counter(key, delta, False, ttl))
         )
 
-    async def decr(self, key: Key, delta: int = 1, *, ttl: int) -> int:
+    async def decr(self, key: Key, delta: int = 1, *, ttl: Ttl) -> int:
         """Atomically subtract ``delta``, saturating at zero."""
         self._check_open()
         return cast(
@@ -805,14 +809,14 @@ class AsyncMemcache(ScenarioBase):
     # ------------------------------------------------------------------
     # conditional blind writes (S8/S9)
 
-    async def add(self, key: Key, value: Any, ttl: int) -> bool:
+    async def add(self, key: Key, value: Any, ttl: Ttl) -> bool:
         """Store only if the key does not exist; True when this call won."""
         self._check_open()
         return cast(
             bool, await self._run_call(self._call_store_if(key, value, ttl, "add"))
         )
 
-    async def replace(self, key: Key, value: Any, ttl: int) -> bool:
+    async def replace(self, key: Key, value: Any, ttl: Ttl) -> bool:
         """Store only if the key still exists; never resurrects a deleted key."""
         self._check_open()
         return cast(
@@ -820,7 +824,7 @@ class AsyncMemcache(ScenarioBase):
             await self._run_call(self._call_store_if(key, value, ttl, "replace")),
         )
 
-    async def touch(self, key: Key, ttl: int) -> bool:
+    async def touch(self, key: Key, ttl: Ttl) -> bool:
         """Extend a key's ttl without transferring its value."""
         self._check_open()
         return cast(bool, await self._run_call(self._call_touch(key, ttl)))

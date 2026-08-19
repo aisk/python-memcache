@@ -13,8 +13,10 @@ never appear in a scenario-level signature or return value.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 from collections.abc import Callable, Sequence
 
@@ -46,6 +48,10 @@ from .meta_api import (
 FOREVER = 0
 """The ttl for entries that must never expire, matching the protocol's 0."""
 
+Ttl = int | timedelta | datetime
+"""What a lifetime argument accepts: an int or ``timedelta`` duration from
+now, or an aware ``datetime`` naming the absolute moment of expiry."""
+
 LEASE_TTL = 30
 """How long a miss-path lease placeholder lives, in seconds.
 
@@ -73,33 +79,61 @@ RAISE = object()
 infrastructure failures are never absorbed, even in degrade mode."""
 
 
-def wire_ttl(ttl: int, name: str = "ttl") -> int:
-    """Validate a caller ttl and convert it to what goes on the wire."""
-    if isinstance(ttl, bool) or not isinstance(ttl, int):
+def wire_ttl(ttl: Ttl, name: str = "ttl") -> int:
+    """Validate a caller lifetime and convert it to what goes on the wire.
+
+    An int or ``timedelta`` is a duration from now, rounded up to whole
+    seconds; an aware ``datetime`` is the absolute moment of expiry. The
+    raw protocol reads values beyond 30 days as unix timestamps, so long
+    durations are converted before they hit the wire.
+    """
+    if isinstance(ttl, timedelta):
+        if ttl < timedelta(0):
+            raise ValueError("%s must not be negative" % name)
+        seconds = math.ceil(ttl.total_seconds())
+    elif isinstance(ttl, datetime):
+        if ttl.tzinfo is None or ttl.tzinfo.utcoffset(ttl) is None:
+            raise ValueError(
+                "%s datetime must be timezone-aware; a naive datetime "
+                "shifts with the interpreting clock" % name
+            )
+        if ttl.timestamp() <= time.time():
+            raise ValueError("%s datetime must be in the future" % name)
+        return math.ceil(ttl.timestamp())
+    elif isinstance(ttl, bool) or not isinstance(ttl, int):
         raise TypeError(
-            "%s must be an int number of seconds; use FOREVER (0) for no expiry" % name
+            "%s must be an int or timedelta duration or an aware datetime; "
+            "use FOREVER (0) for no expiry" % name
         )
-    if ttl < 0:
-        raise ValueError("%s must not be negative" % name)
-    if ttl > _UNIX_TTL_THRESHOLD:
-        return int(time.time()) + ttl
-    return ttl
+    else:
+        if ttl < 0:
+            raise ValueError("%s must not be negative" % name)
+        seconds = ttl
+    if seconds > _UNIX_TTL_THRESHOLD:
+        return int(time.time()) + seconds
+    return seconds
 
 
-def check_refresh_ahead(ttl: int, refresh_ahead: int | None) -> int | None:
-    """Validate refresh_ahead against the caller's ttl; None disables it."""
+def check_refresh_ahead(wire: int, refresh_ahead: int | timedelta | None) -> int | None:
+    """Validate refresh_ahead against the wire ttl; None disables it."""
     if refresh_ahead is None:
         return None
-    if isinstance(refresh_ahead, bool) or not isinstance(refresh_ahead, int):
-        raise TypeError("refresh_ahead must be an int number of seconds")
-    if refresh_ahead < 0:
+    if isinstance(refresh_ahead, timedelta):
+        if refresh_ahead < timedelta(0):
+            raise ValueError("refresh_ahead must not be negative")
+        refresh_ahead = math.ceil(refresh_ahead.total_seconds())
+    elif isinstance(refresh_ahead, bool) or not isinstance(refresh_ahead, int):
+        raise TypeError("refresh_ahead must be an int or timedelta number of seconds")
+    elif refresh_ahead < 0:
         raise ValueError("refresh_ahead must not be negative")
     if refresh_ahead == 0:
         return None
-    if ttl != FOREVER and refresh_ahead >= ttl:
-        # A window at or beyond the ttl would put every write-back already
-        # inside it, turning steady reads into a perpetual recompute loop.
-        raise ValueError("refresh_ahead must be shorter than ttl")
+    if wire != FOREVER:
+        remaining = wire - int(time.time()) if wire > _UNIX_TTL_THRESHOLD else wire
+        if refresh_ahead >= remaining:
+            # A window at or beyond the ttl would put every write-back already
+            # inside it, turning steady reads into a perpetual recompute loop.
+            raise ValueError("refresh_ahead must be shorter than ttl")
     return refresh_ahead
 
 
@@ -685,14 +719,14 @@ class ScenarioBase:
 
     # -- verb planning, shared by direct calls and pipelines -----------
 
-    def _call_get(self, key: Key, default: Any, extend_ttl: int | None) -> Call:
+    def _call_get(self, key: Key, default: Any, extend_ttl: Ttl | None) -> Call:
         extend = None if extend_ttl is None else wire_ttl(extend_ttl, "extend_ttl")
         op, finish = plan_get(
             self._wire_key(key), key, self._serializer, default, extend
         )
         return Call(key, op, finish, absorb=default)
 
-    def _call_set(self, key: Key, value: Any, ttl: int) -> Call:
+    def _call_set(self, key: Key, value: Any, ttl: Ttl) -> Call:
         ttl = wire_ttl(ttl)
         raw, client_flags = dump_value(self._serializer, key, value)
         op, stored = plan_store(self._wire_key(key), key, raw, client_flags, ttl)
@@ -706,7 +740,7 @@ class ScenarioBase:
 
         return Call(key, op, finish, absorb=None)
 
-    def _call_store_if(self, key: Key, value: Any, ttl: int, mode: str) -> Call:
+    def _call_store_if(self, key: Key, value: Any, ttl: Ttl, mode: str) -> Call:
         ttl = wire_ttl(ttl)
         raw, client_flags = dump_value(self._serializer, key, value)
         op, stored = plan_store(
@@ -720,7 +754,7 @@ class ScenarioBase:
         # inventing one during an outage misleads both ways, so no absorb.
         return Call(key, op, finish, absorb=RAISE)
 
-    def _call_delete(self, key: Key, grace: int) -> Call:
+    def _call_delete(self, key: Key, grace: Ttl) -> Call:
         grace = wire_ttl(grace, "grace")
         op, erased = plan_erase(self._wire_key(key), key, grace=grace)
 
@@ -729,17 +763,17 @@ class ScenarioBase:
 
         return Call(key, op, finish, absorb=False)
 
-    def _call_counter(self, key: Key, delta: int, decrement: bool, ttl: int) -> Call:
+    def _call_counter(self, key: Key, delta: int, decrement: bool, ttl: Ttl) -> Call:
         op, finish = plan_counter(
             self._wire_key(key), key, delta, decrement, wire_ttl(ttl)
         )
         return Call(key, op, finish, absorb=RAISE)
 
-    def _call_touch(self, key: Key, ttl: int) -> Call:
+    def _call_touch(self, key: Key, ttl: Ttl) -> Call:
         op, finish = plan_touch(self._wire_key(key), key, wire_ttl(ttl))
         return Call(key, op, finish, absorb=False)
 
-    def _call_concat(self, key: Key, fragment: Any, ttl: int, mode: str) -> Call:
+    def _call_concat(self, key: Key, fragment: Any, ttl: Ttl, mode: str) -> Call:
         op, finish = plan_concat(
             self._wire_key(key), key, fragment_bytes(fragment), wire_ttl(ttl), mode
         )
@@ -752,9 +786,9 @@ class ScenarioBase:
     @staticmethod
     def _factory_args(
         factory: Callable[[], Any] | None,
-        ttl: int | None,
-        refresh_ahead: int | None,
-        extend_ttl: int | None,
+        ttl: Ttl | None,
+        refresh_ahead: int | timedelta | None,
+        extend_ttl: Ttl | None,
     ) -> tuple[int, int | None] | None:
         """Validate get's parameter cluster; None means the plain path.
 
@@ -781,12 +815,14 @@ class ScenarioBase:
                 "factory requires ttl; every write states its lifetime, "
                 "FOREVER for no expiry"
             )
-        return wire_ttl(ttl), check_refresh_ahead(ttl, refresh_ahead)
+        wire = wire_ttl(ttl)
+        return wire, check_refresh_ahead(wire, refresh_ahead)
 
 
 __all__ = [
     "FOREVER",
     "ItemInfo",
     "Key",
+    "Ttl",
     "key_bytes",
 ]

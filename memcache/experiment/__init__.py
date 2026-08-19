@@ -32,6 +32,7 @@ from .client import (
     Memcache,
     MetaNamespace,
     Pipeline,
+    Ttl,
 )
 from .meta_api import MetaCommandResult
 
@@ -60,4 +61,5 @@ __all__ = [
     "SerializeError",
     "Serializer",
     "StrictSerializer",
+    "Ttl",
 ]

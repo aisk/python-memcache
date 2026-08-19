@@ -1,5 +1,6 @@
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -86,6 +87,39 @@ def test_ttl_validation():
             client.set("k", "v", ttl=1.5)  # type: ignore[arg-type]
 
 
+def test_ttl_accepts_timedelta(cache):
+    cache.set("lasting", "v", ttl=timedelta(minutes=10))
+    assert 0 < cache.inspect("lasting").ttl <= 600
+
+
+def test_ttl_subsecond_timedelta_rounds_up_not_forever(cache):
+    cache.set("blink", "v", ttl=timedelta(milliseconds=500))
+    assert cache.inspect("blink").ttl != -1
+
+
+def test_ttl_rejects_negative_timedelta():
+    with Memcache(ADDR) as client:
+        with pytest.raises(ValueError):
+            client.set("k", "v", ttl=timedelta(seconds=-1))
+        with pytest.raises(ValueError):
+            client.set("k", "v", ttl=timedelta(milliseconds=-500))
+
+
+def test_ttl_accepts_aware_datetime(cache):
+    cache.set("dated", "v", ttl=datetime.now(timezone.utc) + timedelta(minutes=5))
+    # The absolute moment is rounded up to a whole second, so the remaining
+    # lifetime may read one second past the requested duration.
+    assert 0 < cache.inspect("dated").ttl <= 301
+
+
+def test_ttl_rejects_naive_and_past_datetime():
+    with Memcache(ADDR) as client:
+        with pytest.raises(ValueError):
+            client.set("k", "v", ttl=datetime.now() + timedelta(minutes=5))
+        with pytest.raises(ValueError):
+            client.set("k", "v", ttl=datetime.now(timezone.utc) - timedelta(minutes=5))
+
+
 def test_zero_byte_values_are_rejected(cache):
     with pytest.raises(SerializeError):
         cache.set("empty", b"", ttl=60)
@@ -122,6 +156,22 @@ def test_factory_rejects_extend_ttl(cache):
 def test_refresh_ahead_must_be_shorter_than_ttl(cache):
     with pytest.raises(ValueError):
         cache.get("k", factory=lambda: 1, ttl=60, refresh_ahead=60)
+
+
+def test_refresh_ahead_accepts_timedelta(cache):
+    value = cache.get(
+        "k",
+        factory=lambda: 1,
+        ttl=timedelta(minutes=1),
+        refresh_ahead=timedelta(seconds=10),
+    )
+    assert value == 1
+
+
+def test_refresh_ahead_checked_against_datetime_ttl(cache):
+    soon = datetime.now(timezone.utc) + timedelta(seconds=30)
+    with pytest.raises(ValueError):
+        cache.get("k", factory=lambda: 1, ttl=soon, refresh_ahead=60)
 
 
 # ----------------------------------------------------------------------

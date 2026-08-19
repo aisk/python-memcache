@@ -65,7 +65,7 @@ client.cas("key", "new_value", token)
 - 未命中是正常的回答，不是错误。读操作在未命中时返回 `default`（通常是 `None`），异常只用来表达基础设施故障，两者永不混淆。
 - 值是业务对象，序列化器是构造器级的策略。默认的 `StrictSerializer` 只存 bytes、int 和 str；`PickleSerializer` 和 `JsonSerializer` 处理任意对象，`CompressedSerializer` 可以包装它们中的任何一个。
 - key 可以是 str 或 bytes，两种写法指向同一个条目。构造器的 `prefix` 给所有 key 加上命名空间，同时也是整个缓存的版本开关。
-- 每个写入值的方法都要求提供以秒为单位的 `ttl`，客户端没有全局默认 TTL。`FOREVER`（0）表示永不过期，让这个选择在调用处一目了然；负的 ttl 是错误。超过 30 天的生存期会被自动转换（原始协议会把它重新解释为 unix 时间戳）。
+- 每个写入值的方法都要求提供 `ttl`，客户端没有全局默认值。int 或 `timedelta` 表示从现在起的时长，带时区的 `datetime` 表示过期的绝对时刻，`FOREVER`（0）表示永不过期，让这个选择在调用处一目了然。负的时长、没有时区的 datetime、已经过去的时刻都是错误。`grace` 和 `extend_ttl` 接受同样的形式，`refresh_ahead` 是窗口长度，接受 int 或 `timedelta`。
 - 在会自动创建 key 的方法上（`incr`、`decr`、`append`、`prepend`），ttl 只在这次调用创建了 key 时生效，永远不会延长已存在 key 的寿命。
 - 参数之间的约束在调用处大声报错而不是被静默忽略。`ttl` 和 `refresh_ahead` 依赖 `factory`，`factory` 又要求提供 `ttl`，`extend_ttl` 不能与 `factory` 同时使用。
 - 序列化结果为空的值会被拒绝，因为 memcached 用零字节条目表示 lease 占位符。
