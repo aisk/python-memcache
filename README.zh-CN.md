@@ -41,9 +41,9 @@ client.cas("key", "new_value", token)
 
 异步用法与同步 API 一致，使用 `AsyncMemcache` 并加上 `await`。
 
-## 场景客户端（实验性）
+## 基于 meta 协议的高级客户端（实验性）
 
-> **实验性。** 场景客户端位于 `memcache.experiment` 下，其 API 可能在任意次版本中变化。如果你依赖它，请在依赖声明中锁定**次版本号**。补丁版本（`x.y.Z`）不会引入破坏性变更，次版本（`x.Y.0`）则可能。
+> **实验性。** 高级客户端位于 `memcache.experiment` 下，其 API 可能在任意次版本中变化。如果你依赖它，请在依赖声明中锁定**次版本号**。补丁版本（`x.y.Z`）不会引入破坏性变更，次版本（`x.Y.0`）则可能。
 >
 > **requirements.txt**
 > ```
@@ -263,7 +263,7 @@ async with AsyncMemcache(("localhost", 11211), serializer=JsonSerializer()) as c
 
 ### 协议层
 
-场景动词没有覆盖的一切都在 `cache.meta` 后面，它是 meta 协议的 1:1 类型化映射（`get`/`set`/`delete`/`arithmetic`/`debug`，即 `mg`/`ms`/`md`/`ma`/`me`），每个协议 flag 对应一个关键字参数。它工作在原始字节上，返回轻度解析的响应，不做序列化也不做语义映射。客户端的 `prefix` 在这里同样生效，逃生舱看到的 key 与场景层存入的一致。
+高级动词没有覆盖的一切都在 `cache.meta` 后面，它是 meta 协议的 1:1 类型化映射（`get`/`set`/`delete`/`arithmetic`/`debug`，即 `mg`/`ms`/`md`/`ma`/`me`），每个协议 flag 对应一个关键字参数。它工作在原始字节上，返回轻度解析的响应，不做序列化也不做语义映射。客户端的 `prefix` 在这里同样生效，逃生舱看到的 key 与高级层存入的一致。
 
 ```python
 stored = cache.meta.set("key", b"payload", ttl=60, return_cas=True)
@@ -274,7 +274,7 @@ assert got.rc == b"VA" and got.cas == stored.cas
 cache.meta.execute(command="mg", key="key", flags=[b"v", b"t"])
 ```
 
-每个场景的可运行导览见 `examples/scenario_demo.py`，设计依据见 `docs/design-scenario-api.md`。
+完整 API 的可运行导览见 `examples/scenario_demo.py`。
 
 ## 关于项目
 

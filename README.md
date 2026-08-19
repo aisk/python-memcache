@@ -41,9 +41,9 @@ client.cas("key", "new_value", token)
 
 Async usage mirrors the sync API with `AsyncMemcache` and `await`.
 
-## Scenario client (Experimental)
+## High-level client based on the meta protocol (Experimental)
 
-> **Experimental.** The scenario client lives under `memcache.experiment` and its API
+> **Experimental.** The high-level client lives under `memcache.experiment` and its API
 > may change in any minor release. If you depend on it, pin the **minor version**
 > in your dependency spec. Patch releases (`x.y.Z`) will not introduce breaking
 > changes, but minor releases (`x.Y.0`) might.
@@ -266,7 +266,7 @@ Used as an async context manager, the client owns a task group: refresh-ahead an
 
 ### Protocol access
 
-Everything the scenario verbs do not cover lives behind `cache.meta`, a 1:1 typed mapping of the meta protocol (`get`/`set`/`delete`/`arithmetic`/`debug`, i.e. `mg`/`ms`/`md`/`ma`/`me`) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping. The client's `prefix` applies here too, so the escape hatch sees the same keys the scenario layer stores.
+Everything the high-level verbs do not cover lives behind `cache.meta`, a 1:1 typed mapping of the meta protocol (`get`/`set`/`delete`/`arithmetic`/`debug`, i.e. `mg`/`ms`/`md`/`ma`/`me`) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping. The client's `prefix` applies here too, so the escape hatch sees the same keys the high-level layer stores.
 
 ```python
 stored = cache.meta.set("key", b"payload", ttl=60, return_cas=True)
@@ -277,7 +277,7 @@ assert got.rc == b"VA" and got.cas == stored.cas
 cache.meta.execute(command="mg", key="key", flags=[b"v", b"t"])
 ```
 
-See `examples/scenario_demo.py` for a runnable tour of every scenario, and `docs/design-scenario-api.md` for the design rationale.
+See `examples/scenario_demo.py` for a runnable tour of the whole API.
 
 ## About the Project
 

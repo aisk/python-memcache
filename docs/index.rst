@@ -26,14 +26,14 @@ Core client
    :members:
    :undoc-members:
 
-Scenario client (experimental)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+High-level client based on the meta protocol (experimental)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. note::
 
    ``Memcache`` and ``AsyncMemcache`` under ``memcache.experiment`` may change in any minor release. If you depend on them, pin the minor version in your dependency spec (e.g. ``memcache~=0.14.0``).
 
-``memcache.experiment.Memcache`` is a scenario-level client built on memcached's meta protocol: one method per usage scenario, business values in and out. Reads answer a miss with a default instead of an error, failures leave through exceptions, and protocol concepts (CAS tokens, lease flags, stale markers) never appear in caller code. Policies such as the serializer, a key prefix, and the failure behavior live in the constructor; every write states its lifetime (``FOREVER`` for no expiry).
+``memcache.experiment.Memcache`` is a high-level client built on memcached's meta protocol: one method per usage scenario, business values in and out. Reads answer a miss with a default instead of an error, failures leave through exceptions, and protocol concepts (CAS tokens, lease flags, stale markers) never appear in caller code. Policies such as the serializer, a key prefix, and the failure behavior live in the constructor; every write states its lifetime (``FOREVER`` for no expiry).
 
 .. code-block:: python
 
@@ -59,7 +59,7 @@ Scenario client (experimental)
 
 Failure behavior is a constructor policy. The default ``on_error="raise"`` surfaces infrastructure trouble as ``OperationFailedError`` (a sent-but-unacknowledged write raises ``AmbiguousWriteError``, and that never degrades). ``on_error="degrade"`` decouples a cache outage from a site outage: reads become misses, a ``get`` with a factory computes locally, blind writes are dropped silently, while operations whose answer feeds business decisions (``add``, ``replace``, ``incr``, ``update``, ``pop``) still raise. Absorbed failures go to the ``on_failure`` hook.
 
-For protocol experts, ``cache.meta`` maps the wire commands one-to-one (``mg``/``ms``/``md``/``ma``/``me``) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping. See ``docs/design-scenario-api.md`` for the design rationale.
+For protocol experts, ``cache.meta`` maps the wire commands one-to-one (``mg``/``ms``/``md``/``ma``/``me``) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping.
 
 .. automodule:: memcache.experiment
    :members:

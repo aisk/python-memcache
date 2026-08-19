@@ -142,3 +142,7 @@ cython_debug/
 
 # Poetry
 poetry.lock
+
+# Local design notes
+docs/design-review-experiment.md
+docs/design-scenario-api.md
