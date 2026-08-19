@@ -192,7 +192,7 @@ Every write back is conditional on the version observed at election, so a key de
 cache.update(key, fn, default=..., ttl=...)   # -> new value
 ```
 
-`update` atomically transforms a value. It reads the current value with its version, applies `fn`, writes back only if nothing changed in between, and retries on conflict. On a miss it starts from `default`; without one it raises `NotFoundError`. `fn` may run multiple times, so it must be pure. If the retry loop keeps losing to concurrent writers, `update` raises `ConflictError`. A value kept stale by a soft `delete` counts as a miss, because transforming invalidated data would silently launder it back to fresh.
+`update` atomically transforms a value. It reads the current value with its version, applies `fn`, writes back only if nothing changed in between, and retries on conflict. On a miss it starts from `default`; without one it raises `NotFoundError`. `fn` may run multiple times, so it must be pure. Raising any exception inside `fn` aborts the call, the entry is left unwritten and the exception propagates unchanged. If the retry loop keeps losing to concurrent writers, `update` raises `ConflictError`. A value kept stale by a soft `delete` counts as a miss, because transforming invalidated data would silently launder it back to fresh.
 
 ```python
 cache.update("cart:42", lambda cart: cart + [item], default=[], ttl=1800)

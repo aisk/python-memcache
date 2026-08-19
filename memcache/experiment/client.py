@@ -829,11 +829,13 @@ class Memcache(ScenarioBase):
         Reads with a version, applies ``fn``, writes back only if the entry
         did not change in between, and retries on conflict; version tokens
         never appear in caller code. ``fn`` must be pure: it may run several
-        times. A miss starts from ``default``; without one it raises
-        :class:`NotFoundError`. An entry kept stale by ``delete(grace=...)``
-        counts as a miss: ``fn`` transforms rather than recomputes, and
-        transforming invalidated data would silently launder it back to
-        fresh. Exhausted retries raise :class:`ConflictError`.
+        times. Any exception raised by ``fn`` aborts the call, leaving the
+        entry unwritten, and propagates unchanged. A miss starts from
+        ``default``; without one it raises :class:`NotFoundError`. An entry
+        kept stale by ``delete(grace=...)`` counts as a miss: ``fn``
+        transforms rather than recomputes, and transforming invalidated
+        data would silently launder it back to fresh. Exhausted retries
+        raise :class:`ConflictError`.
         """
         self._check_open()
         ttl = wire_ttl(ttl)

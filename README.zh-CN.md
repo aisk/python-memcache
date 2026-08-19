@@ -189,7 +189,7 @@ feed = cache.get("home:feed", factory=build_feed, ttl=300, refresh_ahead=30)
 cache.update(key, fn, default=..., ttl=...)   # -> new value
 ```
 
-`update` 原子地变换一个值。它带版本读出当前值，应用 `fn`，只在中间没有别人改动时写回，冲突则重试。未命中时以 `default` 为起点，没有提供 `default` 则抛出 `NotFoundError`。`fn` 可能运行多次，因此必须是纯函数。如果重试循环一直输给并发写入者，`update` 抛出 `ConflictError`。被软 `delete` 标记为过时的值按未命中处理，因为在已失效的数据上做变换会把它无声地洗回新鲜状态。
+`update` 原子地变换一个值。它带版本读出当前值，应用 `fn`，只在中间没有别人改动时写回，冲突则重试。未命中时以 `default` 为起点，没有提供 `default` 则抛出 `NotFoundError`。`fn` 可能运行多次，因此必须是纯函数。在 `fn` 中抛出任何异常都会中止本次调用，条目保持未写，异常原样传出。如果重试循环一直输给并发写入者，`update` 抛出 `ConflictError`。被软 `delete` 标记为过时的值按未命中处理，因为在已失效的数据上做变换会把它无声地洗回新鲜状态。
 
 ```python
 cache.update("cart:42", lambda cart: cart + [item], default=[], ttl=1800)
