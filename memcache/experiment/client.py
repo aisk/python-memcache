@@ -12,7 +12,6 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
 from typing import Any, cast
@@ -41,6 +40,7 @@ from ._core import (
     Call,
     ItemInfo,
     Key,
+    PipelineRun,
     ReadView,
     ScenarioBase,
     Ttl as Ttl,
@@ -205,50 +205,35 @@ class _InFlight:
         self._server = server
         self._connection = connection
         self._chunks = chunks
-        self.count = sum(len(chunk) for chunk in chunks)
 
-    def finish(self, deadline: float | None) -> list[MetaResult]:
+    def finish(self, deadline: float | None) -> PipelineRun:
         """Read each chunk's barrier, sending the next one as room frees up."""
-        responses: list[MetaResult] = []
-        written = len(self._chunks[0])
-        confirmed = 0
+        run = PipelineRun([], written=len(self._chunks[0]))
         try:
             for position, chunk in enumerate(self._chunks):
-                responses.extend(
-                    self._connection.receive_pipeline(written, _remaining(deadline))
+                run.responses.extend(
+                    self._connection.receive_pipeline(run.written, _remaining(deadline))
                 )
-                confirmed += len(chunk)
+                run.confirmed += len(chunk)
                 if position + 1 < len(self._chunks):
                     following = self._chunks[position + 1]
                     self._connection.send_pipeline(following, _remaining(deadline))
-                    written += len(following)
+                    run.written += len(following)
         except BaseException as exc:
             self._server._discard(self._connection)
             if not isinstance(exc, Exception):
                 raise
+            # Everything written so far is on the wire, so even an expired
+            # deadline leaves the unconfirmed side effects ambiguous.
             if isinstance(exc, PipelineError):
-                raise PipelineError(
-                    max(written, exc.written),
-                    responses + exc.responses,
-                    exc.cause,
-                    confirmed,
-                )
-            # Everything written so far is on the wire, so an expired deadline
-            # here still leaves the unconfirmed side effects ambiguous.
-            raise PipelineError(written, responses, exc, confirmed)
+                run.responses.extend(exc.responses)
+                run.written = max(run.written, exc.written)
+                run.error = exc.cause
+            else:
+                run.error = exc
+            return run
         self._server._release(self._connection)
-        return responses
-
-
-@dataclass
-class _PipelineRun:
-    """What one server's pipeline produced, successful or not."""
-
-    responses: list[MetaResult]
-    written: int
-    barrier: bool
-    error: BaseException | None
-    confirmed: int = 0
+        return run
 
 
 class _Flight:
@@ -513,8 +498,16 @@ class Pipeline:
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         if exc_type is not None:
+            self._skip()
             return
         self._execute()
+
+    def _skip(self) -> None:
+        self._done = True
+        for deferred in self._results:
+            deferred._error = RuntimeError(
+                "pipeline was not executed because the with block raised"
+            )
 
     def _push(self, call: Call) -> Deferred:
         if self._done:
@@ -527,11 +520,13 @@ class Pipeline:
     def _execute(self) -> None:
         self._done = True
         outcomes = self._client._run_ops([call.op for call in self._calls])
+        wins: list[tuple[Key, ReadView]] = []
         for call, outcome, deferred in zip(self._calls, outcomes, self._results):
             try:
-                deferred._value = self._client._settle_call(call, outcome)
+                deferred._value = self._client._settle_call(call, outcome, wins)
             except Exception as error:
                 deferred._error = error
+        self._client._return_wins(wins)
 
     def get(
         self, key: Key, default: Any = None, *, extend_ttl: Ttl | None = None
@@ -627,17 +622,9 @@ class Memcache(ScenarioBase):
             command, self._timeout if timeout is None else timeout
         )
 
-    @staticmethod
-    def _failed_run(error: BaseException) -> _PipelineRun:
-        if isinstance(error, PipelineError):
-            return _PipelineRun(
-                error.responses, error.written, False, error, error.confirmed
-            )
-        return _PipelineRun([], 0, False, error)
-
     def _run_pipelines(
         self, grouped: dict[_Server, list[MetaCommand]]
-    ) -> dict[_Server, _PipelineRun]:
+    ) -> dict[_Server, PipelineRun]:
         """Write every server's pipeline, then read them back one by one.
 
         The servers process their pipelines concurrently while this thread
@@ -647,20 +634,15 @@ class Memcache(ScenarioBase):
         whole batch as a single deadline.
         """
         deadline = _deadline(self._timeout)
-        runs: dict[_Server, _PipelineRun] = {}
+        runs: dict[_Server, PipelineRun] = {}
         pending: list[tuple[_Server, _InFlight]] = []
         for server, commands in grouped.items():
             try:
                 pending.append((server, server.start_pipeline(commands, deadline)))
             except Exception as exc:
-                runs[server] = self._failed_run(exc)
+                runs[server] = PipelineRun.failed(exc)
         for server, flight in pending:
-            try:
-                responses = flight.finish(deadline)
-            except Exception as exc:
-                runs[server] = self._failed_run(exc)
-            else:
-                runs[server] = _PipelineRun(responses, flight.count, True, None)
+            runs[server] = flight.finish(deadline)
         return runs
 
     def _run_ops(self, ops: Sequence[WireOp]) -> list[WireOutcome]:
@@ -676,19 +658,7 @@ class Memcache(ScenarioBase):
         )
         output: list[WireOutcome | None] = [None] * len(ops)
         for server, group in grouped.items():
-            run = runs[server]
-            cause = (
-                run.error.cause if isinstance(run.error, PipelineError) else run.error
-            )
-            resolve_group(
-                group,
-                output,
-                run.responses,
-                run.written,
-                run.barrier,
-                cause,
-                run.confirmed,
-            )
+            resolve_group(group, output, runs[server])
         return finalize_outcomes(output)
 
     def _run_one(self, op: WireOp) -> WireOutcome:
@@ -697,7 +667,18 @@ class Memcache(ScenarioBase):
     # ------------------------------------------------------------------
     # shared call plumbing
 
-    def _settle_call(self, call: Call, outcome: WireOutcome) -> Any:
+    def _settle_call(
+        self,
+        call: Call,
+        outcome: WireOutcome,
+        wins: list[tuple[Key, ReadView]] | None = None,
+    ) -> Any:
+        """Interpret one outcome, applying the degrade policy.
+
+        A stale-recache token the read accidentally consumed is handed back
+        right away, or collected into ``wins`` so a batch can return all of
+        its tokens in one extra round trip per server.
+        """
         try:
             value, win = call.finish(outcome)
         except OperationFailedError as exc:
@@ -705,18 +686,30 @@ class Memcache(ScenarioBase):
                 return call.absorb
             raise
         if win is not None:
-            self._return_win(call.key, win)
+            if wins is None:
+                self._return_wins([(call.key, win)])
+            else:
+                wins.append((call.key, win))
         return value
 
     def _run_call(self, call: Call) -> Any:
         return self._settle_call(call, self._run_one(call.op))
 
     def _return_win(self, key: Key, view: ReadView) -> None:
-        """Hand an accidentally consumed stale-recache token back."""
-        if view.cas is None:
+        self._return_wins([(key, view)])
+
+    def _return_wins(self, wins: list[tuple[Key, ReadView]]) -> None:
+        """Hand accidentally consumed stale-recache tokens back."""
+        wins = [(key, view) for key, view in wins if view.cas is not None]
+        if not wins:
             return
         try:
-            settle(key, self._run_one(plan_return_win(self._wire_key(key), view)))
+            ops = [plan_return_win(self._wire_key(key), view) for key, view in wins]
+            for (key, _), outcome in zip(wins, self._run_ops(ops)):
+                try:
+                    settle(key, outcome)
+                except Exception as exc:
+                    self._report(exc)
         except Exception as exc:
             self._report(exc)
 
@@ -787,10 +780,12 @@ class Memcache(ScenarioBase):
         calls = [self._call_get(key, MISSING, None) for key in keys]
         outcomes = self._run_ops([call.op for call in calls])
         found: dict[Key, Any] = {}
+        wins: list[tuple[Key, ReadView]] = []
         for call, outcome in zip(calls, outcomes):
-            value = self._settle_call(call, outcome)
+            value = self._settle_call(call, outcome, wins)
             if value is not MISSING:
                 found[call.key] = value
+        self._return_wins(wins)
         return found
 
     def set_many(self, mapping: Mapping[Key, Any], ttl: Ttl) -> None:
@@ -808,12 +803,14 @@ class Memcache(ScenarioBase):
     def _finish_writes(self, calls: list[Call]) -> None:
         outcomes = self._run_ops([call.op for call in calls])
         first_error: BaseException | None = None
+        wins: list[tuple[Key, ReadView]] = []
         for call, outcome in zip(calls, outcomes):
             try:
-                self._settle_call(call, outcome)
+                self._settle_call(call, outcome, wins)
             except Exception as exc:
                 if first_error is None:
                     first_error = exc
+        self._return_wins(wins)
         if first_error is not None:
             raise first_error
 

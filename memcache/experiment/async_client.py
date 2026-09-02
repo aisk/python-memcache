@@ -34,7 +34,6 @@ from ..errors import (
     MemcacheError,
     NotFoundError,
     OperationFailedError,
-    PipelineError,
     ProtocolError,
 )
 from ..meta_command import MetaCommand, MetaResult
@@ -48,6 +47,7 @@ from ._core import (
     Call,
     ItemInfo,
     Key,
+    PipelineRun,
     ReadView,
     ScenarioBase,
     Ttl,
@@ -408,8 +408,16 @@ class AsyncPipeline:
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         if exc_type is not None:
+            self._skip()
             return
         await self._execute()
+
+    def _skip(self) -> None:
+        self._done = True
+        for deferred in self._results:
+            deferred._error = RuntimeError(
+                "pipeline was not executed because the with block raised"
+            )
 
     def _push(self, call: Call) -> Deferred:
         if self._done:
@@ -564,26 +572,15 @@ class AsyncMemcache(ScenarioBase):
     ) -> None:
         commands = [pipeline_command(index, op) for index, op in group]
         try:
-            responses = await server.pipeline(commands, self._timeout)
-        except PipelineError as exc:
-            resolve_group(
-                group,
-                output,
-                exc.responses,
-                exc.written,
-                False,
-                exc.cause,
-                exc.confirmed,
-            )
+            run = PipelineRun(await server.pipeline(commands, self._timeout))
         except TimeoutError as exc:
             # The timeout cancelled the pipeline mid-flight and the precise
             # written count is lost, so every side-effect command counts as
             # possibly landed.
-            resolve_group(group, output, [], len(group), False, exc, 0)
+            run = PipelineRun.failed(exc, written=len(group))
         except Exception as exc:
-            resolve_group(group, output, [], 0, False, exc, 0)
-        else:
-            resolve_group(group, output, responses, len(group), True, None, 0)
+            run = PipelineRun.failed(exc)
+        resolve_group(group, output, run)
 
     async def _run_one(self, op: WireOp) -> WireOutcome:
         return (await self._run_ops([op]))[0]
