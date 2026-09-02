@@ -27,6 +27,7 @@ from ..errors import (
     AmbiguousWriteError,
     MemcacheError,
     OperationFailedError,
+    PipelineError,
     ProtocolError,
     SerializeError,
 )
@@ -217,6 +218,36 @@ def pipeline_command(index: int, op: WireOp) -> MetaCommand:
     )
 
 
+@dataclass
+class PipelineRun:
+    """What one server's pipeline produced, successful or not.
+
+    The single shape every transport reduces its pipeline to, whether the
+    batch cleared its barrier or died partway. ``written`` counts commands
+    that reached the wire before the failure, ``confirmed`` counts leading
+    commands that cleared a barrier of their own in an earlier chunk, and
+    ``error`` is the underlying cause; None means the whole batch cleared
+    its barrier and every silence is a settled quiet outcome.
+    """
+
+    responses: list[MetaResult]
+    written: int = 0
+    confirmed: int = 0
+    error: BaseException | None = None
+
+    @classmethod
+    def failed(cls, error: BaseException, written: int = 0) -> "PipelineRun":
+        """Reduce a transport failure to a run.
+
+        A :class:`~memcache.errors.PipelineError` carries what the
+        connection learned before dying; any other error means nothing was
+        written unless the caller says otherwise.
+        """
+        if isinstance(error, PipelineError):
+            return cls(error.responses, error.written, error.confirmed, error.cause)
+        return cls([], written, 0, error)
+
+
 def _index_responses(
     responses: Sequence[MetaResult],
 ) -> tuple[dict[int, MetaResult], BaseException | None]:
@@ -237,23 +268,24 @@ def _index_responses(
 def resolve_group(
     group: Sequence[tuple[int, WireOp]],
     output: list[WireOutcome | None],
-    responses: Sequence[MetaResult],
-    written: int,
-    barrier: bool,
-    failure: BaseException | None,
-    confirmed: int = 0,
+    run: PipelineRun,
 ) -> None:
-    """Attribute one server's responses back onto its operations.
+    """Attribute one server's run back onto its operations.
 
-    ``confirmed`` counts leading commands that cleared a barrier of their
-    own in an earlier chunk. Their silence is the ordinary quiet-protocol
-    kind and means a settled outcome, exactly as ``barrier`` does for the
-    whole pipeline, so a later chunk's failure must not drag them into
-    failed or ambiguous.
+    A command that answered is settled from its response. A silent one is a
+    settled quiet outcome when the batch cleared its barrier, when it cleared
+    an earlier chunk's barrier, or when a later command on the same
+    connection answered: the server handles a connection's commands in
+    order, so an answer proves everything before it was processed. Any other
+    silence is the failure, ambiguous when the command may have changed
+    server state.
     """
-    by_index, index_failure = _index_responses(responses)
-    if index_failure is not None:
-        failure = index_failure
+    by_index, index_failure = _index_responses(run.responses)
+    failure = index_failure or run.error
+    processed = run.confirmed
+    for position, (index, _) in enumerate(group):
+        if index in by_index:
+            processed = max(processed, position + 1)
     for position, (index, op) in enumerate(group):
         raw = by_index.get(index)
         if raw is not None:
@@ -261,12 +293,12 @@ def resolve_group(
                 output[index] = WireOutcome(response=parse_meta_result(raw))
             except Exception as exc:
                 output[index] = WireOutcome(error=exc)
-        elif barrier or position < confirmed:
+        elif run.error is None or position < processed:
             output[index] = WireOutcome()
         else:
             error = failure or MemcacheError("pipeline did not reach barrier")
             output[index] = WireOutcome(
-                error=error, ambiguous=position < written and op.side_effect
+                error=error, ambiguous=position < run.written and op.side_effect
             )
 
 

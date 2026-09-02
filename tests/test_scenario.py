@@ -589,6 +589,36 @@ def test_pipeline_body_exception_skips_execution(cache):
     assert cache.get("skipped") is None
 
 
+def test_pipeline_attribution_trusts_in_order_processing():
+    # A later command's answer proves the server processed everything before
+    # it on that connection, so a silent quiet write ahead of it is settled
+    # even though the batch died before its barrier.
+    from memcache.experiment._core import (
+        PipelineRun,
+        WireOp,
+        WireOutcome,
+        finalize_outcomes,
+        resolve_group,
+    )
+    from memcache.meta_command import MetaCommand, MetaResult
+
+    ops = [
+        (0, WireOp(MetaCommand(b"ms", b"a", 1, [], b"x"), side_effect=True)),
+        (1, WireOp(MetaCommand(b"mg", b"b", None, [], None), side_effect=False)),
+        (2, WireOp(MetaCommand(b"ms", b"c", 1, [], b"x"), side_effect=True)),
+        (3, WireOp(MetaCommand(b"ms", b"d", 1, [], b"x"), side_effect=True)),
+    ]
+    answered = MetaResult(b"VA", 1, [b"O1"], b"v")
+    run = PipelineRun([answered], written=3, error=OSError("gone"))
+    pending: list[WireOutcome | None] = [None] * 4
+    resolve_group(ops, pending, run)
+    output = finalize_outcomes(pending)
+    assert output[0].error is None and output[0].response is None
+    assert output[1].response is not None
+    assert output[2].ambiguous and output[2].error is run.error
+    assert not output[3].ambiguous and output[3].error is run.error
+
+
 def test_pipeline_has_no_multi_round_trip_verbs(cache):
     pipeline = cache.pipeline()
     with pytest.raises(TypeError):

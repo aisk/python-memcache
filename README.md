@@ -238,7 +238,7 @@ if hits.value > 100:
 render(user.value)
 ```
 
-A request prelude often needs several independent operations on different keys; a pipeline batches them into one round trip per server. The verbs, signatures and semantics inside are the same as the client's, the only difference being that each call returns a deferred result whose `.value` becomes readable once the with block exits. One failing operation only affects its own `.value`. Operations that are themselves multiple round trips (`get` with a factory, `update`, `pop`, the `_many` family) are not available inside a pipeline.
+A request prelude often needs several independent operations on different keys; a pipeline batches them into one round trip per server. The verbs, signatures and semantics inside are the same as the client's, the only difference being that each call returns a deferred result whose `.value` becomes readable once the with block exits. One failing operation only affects its own `.value`. Operations on the same key are applied in the order they were recorded, since they travel on one connection; across servers there is no ordering. Operations that are themselves multiple round trips (`get` with a factory, `update`, `pop`, the `_many` family) are not available inside a pipeline.
 
 ### Failure policy
 
