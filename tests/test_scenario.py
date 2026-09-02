@@ -92,9 +92,12 @@ def test_ttl_accepts_timedelta(cache):
     assert 0 < cache.inspect("lasting").ttl <= 600
 
 
-def test_ttl_subsecond_timedelta_rounds_up_not_forever(cache):
-    cache.set("blink", "v", ttl=timedelta(milliseconds=500))
-    assert cache.inspect("blink").ttl != -1
+def test_ttl_subsecond_timedelta_rounds_up_not_forever():
+    # Checked on the wire value: a one second entry can already be gone by
+    # the time a follow-up read reaches the server.
+    from memcache.experiment._core import wire_ttl
+
+    assert wire_ttl(timedelta(milliseconds=500)) == 1
 
 
 def test_ttl_rejects_negative_timedelta():
@@ -107,9 +110,10 @@ def test_ttl_rejects_negative_timedelta():
 
 def test_ttl_accepts_aware_datetime(cache):
     cache.set("dated", "v", ttl=datetime.now(timezone.utc) + timedelta(minutes=5))
-    # The absolute moment is rounded up to a whole second, so the remaining
-    # lifetime may read one second past the requested duration.
-    assert 0 < cache.inspect("dated").ttl <= 301
+    # The absolute moment is rounded up to a whole second and memcached's
+    # own clock only ticks once a second, so the remaining lifetime may read
+    # up to two seconds past the requested duration.
+    assert 0 < cache.inspect("dated").ttl <= 302
 
 
 def test_ttl_rejects_naive_and_past_datetime():
