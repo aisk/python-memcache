@@ -183,7 +183,7 @@ feed = cache.get("home:feed", factory=build_feed, ttl=300, refresh_ahead=30)
 
 同步客户端的当选者就地重算，付出一次重算延迟（这个库不拥有线程，谁付出多少延迟完全可预测）。异步客户端的当选者立即返回现值，重算作为客户端持有的后台任务执行，没有任何请求付出刷新延迟。
 
-所有写回都以选举时观察到的版本为条件，因此重算过程中被删除的 key 永远不会被复活。写回失败不改变 `get` 的返回值，只进入 `on_failure` 钩子。带 factory 的 `get` 不会因为协调失败而失败：每条路径的终点都是一个值，或者 factory 自己抛出的异常。
+所有写回都以选举时观察到的版本为条件，因此重算过程中被删除的 key 永远不会被复活。写回失败不改变 `get` 的返回值，只进入 `on_failure` 钩子。带 factory 的 `get` 不会因为协调失败而失败：每条路径的终点都是一个值，或者 factory 自己抛出的异常。唯一的例外是默认的 raise 模式下缓存不可达时，选举那次读和其他读一样会失败。
 
 ### 原子修改
 
@@ -241,7 +241,7 @@ render(user.value)
 
 ### 故障策略
 
-默认情况下每个基础设施故障都以异常形式浮现（`OperationFailedError`，原始原因挂在 cause 上）。构造器策略 `on_error="degrade"` 把缓存故障与整站故障解耦：
+默认情况下每个基础设施故障都以异常形式浮现：`OperationFailedError` 并把原始原因挂在 cause 上，写入已发出但没有收到应答时则是它的子类 `AmbiguousWriteError`。两者都带有 key，消息里包含原因。构造器策略 `on_error="degrade"` 把缓存故障与整站故障解耦：
 
 ```python
 cache = Memcache(*servers, on_error="degrade", on_failure=metrics.count)

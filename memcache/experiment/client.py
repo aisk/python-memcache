@@ -21,7 +21,6 @@ import hashring
 
 from ..connection import Addr, Connection, chunk_pipeline
 from ..errors import (
-    AmbiguousWriteError,
     ConflictError,
     MemcacheError,
     NotFoundError,
@@ -686,7 +685,7 @@ class Memcache(ScenarioBase):
         """
         try:
             value, win = call.finish(outcome)
-        except (OperationFailedError, AmbiguousWriteError) as exc:
+        except OperationFailedError as exc:
             if call.absorb is not RAISE and self._absorb(call.op, exc):
                 return call.absorb
             raise
@@ -1033,7 +1032,7 @@ class Memcache(ScenarioBase):
         for attempt in range(len(backoff) + 1):
             try:
                 view = election(self._run_one(op))
-            except (OperationFailedError, AmbiguousWriteError) as exc:
+            except OperationFailedError as exc:
                 if self._degrade:
                     # Cache outage is not a site outage: compute locally and
                     # skip the cache, keeping the failure observable.

@@ -908,10 +908,18 @@ def test_raise_mode_surfaces_infrastructure_failures():
 
 def test_raise_mode_surfaces_unacknowledged_writes(hung_addr):
     with Memcache(hung_addr, timeout=0.2) as client:
-        with pytest.raises(OperationFailedError):
+        with pytest.raises(OperationFailedError) as info:
             client.get("k")
-        with pytest.raises(AmbiguousWriteError):
+        assert info.value.key == "k"
+        assert "TimeoutError" in str(info.value)
+        with pytest.raises(AmbiguousWriteError) as info:
             client.set("k", "v", ttl=60)
+        # One except clause covers every infrastructure failure; the
+        # subclass is there for callers that must know a repeat is unsafe.
+        assert isinstance(info.value, OperationFailedError)
+        assert info.value.key == "k" and "may or may not" in str(info.value)
+        with pytest.raises(OperationFailedError):
+            client.get("k", factory=lambda: "v", ttl=60)
 
 
 @pytest.fixture()

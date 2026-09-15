@@ -186,7 +186,7 @@ feed = cache.get("home:feed", factory=build_feed, ttl=300, refresh_ahead=30)
 
 The synchronous client's elected winner recomputes in place and pays one recomputation latency (the library owns no threads, so who pays what stays predictable). The async client's winner returns the current value immediately and recomputes as a background task owned by the client, so no request pays the refresh latency.
 
-Every write back is conditional on the version observed at election, so a key deleted mid recompute is never resurrected. Write back failures never change what `get` returns; they go to the `on_failure` hook. A factory `get` never fails because coordination failed: every path ends in a value or the factory's own exception.
+Every write back is conditional on the version observed at election, so a key deleted mid recompute is never resurrected. Write back failures never change what `get` returns; they go to the `on_failure` hook. A factory `get` never fails because coordination failed: every path ends in a value or the factory's own exception, except that in the default raise mode the election read itself can fail like any other read when the cache is unreachable.
 
 ### Atomic modification
 
@@ -244,7 +244,7 @@ A request prelude often needs several independent operations on different keys; 
 
 ### Failure policy
 
-By default every infrastructure failure surfaces as an exception (`OperationFailedError` with the original cause attached). The `on_error="degrade"` constructor policy decouples a cache outage from a site outage:
+By default every infrastructure failure surfaces as an exception: `OperationFailedError` with the original cause attached, or its subclass `AmbiguousWriteError` when a write was sent and no answer came back. Both carry the key, and their message includes the cause. The `on_error="degrade"` constructor policy decouples a cache outage from a site outage:
 
 ```python
 cache = Memcache(*servers, on_error="degrade", on_failure=metrics.count)

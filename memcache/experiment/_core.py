@@ -449,7 +449,7 @@ def settle(key: Key, outcome: WireOutcome) -> MetaCommandResult | None:
     mismatch are answers and pass through in the response.
     """
     if outcome.ambiguous:
-        raise AmbiguousWriteError() from outcome.error
+        raise AmbiguousWriteError(key) from outcome.error
     if outcome.error is not None:
         raise OperationFailedError(key) from outcome.error
     return outcome.response

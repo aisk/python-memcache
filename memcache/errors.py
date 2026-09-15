@@ -43,17 +43,30 @@ class OperationFailedError(MemcacheError):
     underlying cause is attached as ``__cause__``.
     """
 
-    def __init__(self, key: Any) -> None:
-        super().__init__("operation on key %r failed" % (key,))
+    def __init__(self, key: Any, what: str = "failed") -> None:
+        super().__init__("operation on key %r %s" % (key, what))
         self.key = key
 
+    def __str__(self) -> str:
+        # Hooks and log aggregators mostly see str(error); carry the cause
+        # there so a line like "failed: TimeoutError" needs no traceback.
+        message = super().__str__()
+        cause = self.__cause__
+        if cause is None:
+            return message
+        return "%s: %s: %s" % (message, type(cause).__name__, cause)
 
-class AmbiguousWriteError(MemcacheError):
-    """A request was sent but its terminal response was not received."""
 
-    def __init__(self, result: Any | None = None) -> None:
-        super().__init__("operation outcome is ambiguous")
-        self.result = result
+class AmbiguousWriteError(OperationFailedError):
+    """A write was sent but its response never arrived, so it may have landed.
+
+    A kind of :class:`OperationFailedError`, so a caller treating every
+    infrastructure failure alike needs one ``except``; callers that must
+    know whether a repeat is safe catch this subclass first.
+    """
+
+    def __init__(self, key: Any) -> None:
+        super().__init__(key, "may or may not have been applied")
 
 
 class CommandError(MemcacheError):
