@@ -127,7 +127,7 @@ session = cache.get(f"session:{sid}", extend_ttl=1800)
 cache.set(key, value, ttl)              # -> None
 cache.set_many(mapping, ttl)            # -> None
 cache.add(key, value, ttl)              # -> bool, True when this call won
-cache.replace(key, value, ttl)          # -> bool, never resurrects
+cache.replace(key, value, ttl)          # -> bool, never resurrects a hard-deleted key
 cache.touch(key, ttl)                   # -> bool
 cache.delete(key, grace=0)              # -> bool
 cache.delete_many(keys)                 # -> None
@@ -173,7 +173,7 @@ cache.get(key, factory=build, ttl=3600, refresh_ahead=0)   # -> value
 report = cache.get("report:q3", factory=build_report, ttl=3600)
 ```
 
-未命中时，所有进程中只有一个调用者赢得服务端 lease 并运行 factory。同进程内的其他调用者等待这个结果。其他进程轮询等待赢家写回，最多等 `lease_wait`（默认 5 秒），之后本地计算但不写回，所以比这更慢的 factory 会让每个等待中的进程多算一次。把 `lease_wait` 设得比最慢的 factory 更长，或者设为 0 表示从不等待。lease 本身存活 `lease_ttl`（默认 30 秒），赢家在计算途中崩溃后，过了这段时间就失去独占权，下一个读者重新选举。因此一个热点 key 在一千个并发请求下过期，代价是一次重算，而不是一千次。
+未命中时，所有进程中只有一个调用者赢得服务端 lease 并运行 factory。同进程内的其他调用者等待这个结果。其他进程轮询等待赢家写回，最多等 `lease_wait`（默认 5 秒），之后本地计算但不写回，所以比这更慢的 factory 会让每个等待中的进程多算一次。把 `lease_wait` 设得比最慢的 factory 更长，或者设为 0 表示从不等待。lease 本身存活 `lease_ttl`（默认 30 秒），未命中路径的赢家在计算途中崩溃后，过了这段时间就失去独占权，下一个读者重新选举；refresh_ahead 或宽限期内当选的赢家如果 factory 失败，当前值会一直提供到窗口结束。赢家计算期间，这个 key 在服务器上是一个 0 字节的 lease 占位符：读操作、`inspect` 和 `touch` 把它当作不存在，但盲目的条件写（`add`、`replace`、`append`、`prepend`）会看到一个已存在的条目，所以 factory 管理的 key 和盲写的 key 应当是不同的键族。因此一个热点 key 在一千个并发请求下过期，代价是一次重算，而不是一千次。
 
 加上 `refresh_ahead` 后，剩余 ttl 进入窗口的值会被原样返回，同时选出一个调用者重新计算，曲线上永远看不到过期的尖峰：
 
@@ -208,6 +208,8 @@ cache.decr(key, delta=1, ttl=...)   # -> int
 if cache.incr(f"rate:{ip}", ttl=60) > 100:
     raise TooManyRequests
 ```
+
+计数器通过 `incr` 和 `decr` 的返回值读取。memcached 的算术命令不存储类型信息，所以由它创建的计数器用 `get` 读回来是 bytes，`update` 也无法变换它；一个 key 要么是计数器，要么是业务值，不能两者兼是。
 
 ```python
 cache.append(key, fragment, ttl)    # -> None

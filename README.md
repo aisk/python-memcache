@@ -130,7 +130,7 @@ The slide is memcached's native touch and is blind: it extends whatever the read
 cache.set(key, value, ttl)              # -> None
 cache.set_many(mapping, ttl)            # -> None
 cache.add(key, value, ttl)              # -> bool, True when this call won
-cache.replace(key, value, ttl)          # -> bool, never resurrects
+cache.replace(key, value, ttl)          # -> bool, never resurrects a hard-deleted key
 cache.touch(key, ttl)                   # -> bool
 cache.delete(key, grace=0)              # -> bool
 cache.delete_many(keys)                 # -> None
@@ -176,7 +176,7 @@ The highest frequency cache pattern as one modifier: `default` is the static fal
 report = cache.get("report:q3", factory=build_report, ttl=3600)
 ```
 
-On a miss, one caller across all processes wins a server side lease and runs the factory. Other callers in the same process wait on that result. Other processes poll for the winner's write for up to `lease_wait` (5 seconds by default) and then compute locally without writing back, so a factory slower than that costs one extra recomputation per waiting process: set `lease_wait` above your slowest factory, or to 0 to never wait. The lease itself lasts `lease_ttl` (30 seconds by default); a winner that dies mid computation loses its exclusive right after that long and the next reader re-elects. So a hot key expiring under a thousand concurrent requests costs one recomputation, not a thousand.
+On a miss, one caller across all processes wins a server side lease and runs the factory. Other callers in the same process wait on that result. Other processes poll for the winner's write for up to `lease_wait` (5 seconds by default) and then compute locally without writing back, so a factory slower than that costs one extra recomputation per waiting process: set `lease_wait` above your slowest factory, or to 0 to never wait. The lease itself lasts `lease_ttl` (30 seconds by default); a miss-path winner that dies mid computation loses its exclusive right after that long and the next reader re-elects, while a refresh-ahead or grace-period winner whose factory fails leaves the current value serving until its window ends. While the winner computes, the key holds a zero-byte lease placeholder on the server: reads, `inspect` and `touch` treat it as absent, but the blind conditional writes (`add`, `replace`, `append`, `prepend`) see an existing entry, so factory-managed keys and blind-write keys should be different families. So a hot key expiring under a thousand concurrent requests costs one recomputation, not a thousand.
 
 With `refresh_ahead`, a value whose remaining ttl has entered the window is served as is while one elected caller recomputes, so the curve never shows an expiry spike:
 
@@ -211,6 +211,8 @@ cache.decr(key, delta=1, ttl=...)   # -> int
 if cache.incr(f"rate:{ip}", ttl=60) > 100:
     raise TooManyRequests
 ```
+
+A counter is read through `incr` and `decr`'s return value. memcached's arithmetic command stores no type information, so a counter it created reads back through `get` as bytes, and `update` cannot transform it; a key is either a counter or a business value, never both.
 
 ```python
 cache.append(key, fragment, ttl)    # -> None
