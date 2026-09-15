@@ -199,6 +199,11 @@ def test_refresh_ahead_must_be_shorter_than_ttl(cache):
         cache.get("k", factory=lambda: 1, ttl=60, refresh_ahead=60)
 
 
+def test_refresh_ahead_requires_a_finite_ttl(cache):
+    with pytest.raises(ValueError, match="finite ttl"):
+        cache.get("k", factory=lambda: 1, ttl=FOREVER, refresh_ahead=10)
+
+
 def test_refresh_ahead_accepts_timedelta(cache):
     value = cache.get(
         "k",
@@ -392,8 +397,8 @@ def test_lease_ttl_bounds_the_winner_placeholder(cache):
         time.sleep(0.1)
         # The placeholder the winner holds expires with the client's lease
         # ttl, so a winner that dies is re-elected after that long.
-        info = cache.inspect("leased")
-        assert info is not None and 5 <= info.ttl <= 7
+        raw = cache.meta.get("leased", return_ttl=True, return_size=True)
+        assert raw.size == 0 and raw.ttl is not None and 5 <= raw.ttl <= 7
         release.set()
         winner.join()
 
@@ -403,6 +408,8 @@ def test_lease_policy_validation():
         Memcache(ADDR, lease_ttl=0)
     with pytest.raises(TypeError, match="lease_ttl"):
         Memcache(ADDR, lease_ttl=1.5)
+    with pytest.raises(ValueError, match="30 days"):
+        Memcache(ADDR, lease_ttl=timedelta(days=31))
     with pytest.raises(ValueError, match="lease_wait"):
         Memcache(ADDR, lease_wait=-1)
     with pytest.raises(TypeError, match="lease_wait"):
@@ -640,6 +647,48 @@ def test_get_extend_ttl_slides_expiry(cache):
 
 # ----------------------------------------------------------------------
 # S11: event buffers
+
+
+def test_slide_sticks_on_a_stale_entry(cache):
+    # A read that touches a soft-deleted entry wins the grace period's
+    # recache token; handing the token back must not undo the slide.
+    cache.set("session", "data", ttl=1800)
+    cache.delete("session", grace=60)
+    assert cache.get("session", extend_ttl=1800) == "data"
+    assert cache.inspect("session").ttl > 1000
+    cache.set("render", "page", ttl=1800)
+    cache.delete("render", grace=60)
+    assert cache.touch("render", 1800) is True
+    assert cache.inspect("render").ttl > 1000
+    # The token did go back: a factory reader is still elected.
+    calls = []
+    rebuild = lambda: calls.append(1) or "new"  # noqa: E731
+    assert cache.get("render", factory=rebuild, ttl=60) == "new"
+    assert calls == [1]
+
+
+def test_lease_placeholder_is_absent_to_inspect_and_touch(cache):
+    release = threading.Event()
+
+    def slow_build():
+        release.wait(5)
+        return "built"
+
+    winner = threading.Thread(
+        target=lambda: cache.get("leased", factory=slow_build, ttl=60)
+    )
+    winner.start()
+    time.sleep(0.1)
+    try:
+        # The winner's zero-byte placeholder is a coordination artifact, not
+        # an item: every read-only door folds it to absence.
+        assert cache.get("leased") is None
+        assert cache.inspect("leased") is None
+        assert cache.touch("leased", 600) is False
+    finally:
+        release.set()
+        winner.join()
+    assert cache.inspect("leased").size > 0
 
 
 def test_append_pop_buffer(cache):

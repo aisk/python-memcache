@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 from collections.abc import Callable, Sequence
@@ -134,6 +134,10 @@ def lease_ttl_seconds(lease_ttl: int | timedelta) -> int:
         seconds = lease_ttl
     if seconds < 1:
         raise ValueError("lease_ttl must be at least one second")
+    if seconds > _UNIX_TTL_THRESHOLD:
+        # The wire would read a longer value as an absolute timestamp in
+        # 1970 and expire every placeholder on the spot.
+        raise ValueError("lease_ttl must be at most 30 days")
     return seconds
 
 
@@ -176,12 +180,15 @@ def check_refresh_ahead(wire: int, refresh_ahead: int | timedelta | None) -> int
         raise ValueError("refresh_ahead must not be negative")
     if refresh_ahead == 0:
         return None
-    if wire != FOREVER:
-        remaining = wire - int(time.time()) if wire > _UNIX_TTL_THRESHOLD else wire
-        if refresh_ahead >= remaining:
-            # A window at or beyond the ttl would put every write-back already
-            # inside it, turning steady reads into a perpetual recompute loop.
-            raise ValueError("refresh_ahead must be shorter than ttl")
+    if wire == FOREVER:
+        # memcached never elects a refresh for an entry that cannot expire,
+        # so the window would be accepted and silently never open.
+        raise ValueError("refresh_ahead requires a finite ttl")
+    remaining = wire - int(time.time()) if wire > _UNIX_TTL_THRESHOLD else wire
+    if refresh_ahead >= remaining:
+        # A window at or beyond the ttl would put every write-back already
+        # inside it, turning steady reads into a perpetual recompute loop.
+        raise ValueError("refresh_ahead must be shorter than ttl")
     return refresh_ahead
 
 
@@ -516,8 +523,16 @@ def fragment_bytes(fragment: Any) -> bytes:
     return fragment
 
 
-def _stale_win(view: ReadView) -> ReadView | None:
-    return view if view.stale and view.won else None
+def _stale_win(view: ReadView, extended: int | None = None) -> ReadView | None:
+    """The recache token a read consumed, if it did.
+
+    A read that also touched the entry gets the ttl from before the touch
+    in its reply; a token handed back with that ttl would undo the slide,
+    so the extended lifetime rides along instead.
+    """
+    if not (view.stale and view.won):
+        return None
+    return view if extended is None else replace(view, ttl=extended)
 
 
 def accidental_win(key: Key, outcome: WireOutcome) -> ReadView | None:
@@ -590,7 +605,7 @@ def plan_get(
 
     def finish(outcome: WireOutcome) -> tuple[Any, ReadView | None]:
         view = read_view(key, settle(key, outcome))
-        win = _stale_win(view)
+        win = _stale_win(view, extend_ttl)
         if not view.hit or not view.data:
             # A miss, a coordination placeholder, or a genuinely empty
             # entry: the zero-byte rule folds them all to the default.
@@ -666,12 +681,16 @@ def plan_touch(wire_key: Key, key: Key, ttl: int) -> tuple[WireOp, Finish]:
         value=False,
         return_cas=True,
         return_ttl=True,
+        return_size=True,
         touch=ttl,
     )
 
     def finish(outcome: WireOutcome) -> tuple[Any, ReadView | None]:
         view = read_view(key, settle(key, outcome))
-        return view.hit, _stale_win(view)
+        # A zero-byte entry is a lease placeholder, absent by the zero-byte
+        # rule; the blind touch has already reached it, which is why factory
+        # keys and touched keys should be different families.
+        return view.hit and bool(view.size), _stale_win(view, ttl)
 
     return WireOp(command, side_effect=True), finish
 
@@ -744,7 +763,8 @@ def plan_inspect(wire_key: Key, key: Key) -> tuple[WireOp, Finish]:
     def finish(outcome: WireOutcome) -> tuple[Any, ReadView | None]:
         view = read_view(key, settle(key, outcome))
         win = _stale_win(view)
-        if not view.hit:
+        if not view.hit or not view.size:
+            # A miss or a zero-byte lease placeholder: absent, like get says.
             return None, win
         info = ItemInfo(
             ttl=view.ttl,
