@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from memcache.errors import PipelineError
+from memcache.meta_command import MetaCommand
 from memcache.experiment import (
     FOREVER,
     AmbiguousWriteError,
@@ -123,6 +124,40 @@ def test_ttl_rejects_naive_and_past_datetime():
             client.set("k", "v", ttl=datetime.now() + timedelta(minutes=5))
         with pytest.raises(ValueError):
             client.set("k", "v", ttl=datetime.now(timezone.utc) - timedelta(minutes=5))
+
+
+def test_overlong_keys_are_argument_errors(cache):
+    long_key = "k" * 300
+    for call in (
+        lambda: cache.get(long_key),
+        lambda: cache.set(long_key, "v", ttl=60),
+        lambda: cache.delete(long_key),
+        lambda: cache.meta.get(long_key),
+    ):
+        with pytest.raises(ValueError, match="key too long"):
+            call()
+    with pytest.raises(ValueError, match="key too long"):
+        with cache.pipeline() as p:
+            p.set(long_key, "v", ttl=60)
+    # The prefix counts toward the limit, so a key that fits alone can
+    # still be rejected once namespaced.
+    with Memcache(ADDR, prefix="p" * 200) as prefixed:
+        with pytest.raises(ValueError, match="key too long"):
+            prefixed.get("k" * 60)
+
+
+def test_pipeline_counts_written_only_after_encoding():
+    # A command the encoder rejects never reaches the wire, so a failed
+    # pipeline must not report it as possibly landed.
+    from memcache.connection import Connection
+
+    connection = Connection(ADDR, timeout=1)
+    try:
+        with pytest.raises(PipelineError) as info:
+            connection.send_pipeline([MetaCommand(b"ms", b"k" * 300, 1, [], b"x")])
+        assert info.value.written == 0
+    finally:
+        connection.close()
 
 
 def test_zero_byte_values_are_rejected(cache):

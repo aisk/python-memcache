@@ -110,8 +110,11 @@ class AsyncConnection:
                 await self._connect()
             for chunk in chunk_pipeline(commands):
                 for command in chunk:
+                    # Serialize first: a command the encoder rejects never
+                    # reaches the wire and must not count as written.
+                    payload = command.dump()
                     written += 1
-                    await self.stream.send(command.dump())
+                    await self.stream.send(payload)
                 await self.stream.send(b"mn\r\n")
                 while True:
                     result = await self._next_response()

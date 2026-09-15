@@ -145,8 +145,11 @@ class Connection:
         written = 0
         try:
             for command in commands:
+                # Serialize first: a command the encoder rejects never
+                # reaches the wire and must not count as written.
+                payload = command.dump()
                 written += 1
-                self.socket.sendall(command.dump())
+                self.socket.sendall(payload)
             self.socket.sendall(b"mn\r\n")
         except Exception as exc:
             raise PipelineError(written, [], exc)

@@ -31,7 +31,7 @@ from ..errors import (
     ProtocolError,
     SerializeError,
 )
-from ..meta_command import MetaCommand, MetaResult
+from ..meta_command import MetaCommand, MetaResult, encode_key
 from ..serialize import Serializer, StrictSerializer
 from .meta_api import (
     Key,
@@ -768,11 +768,24 @@ class ScenarioBase:
     # -- keys ----------------------------------------------------------
 
     def _wire_key(self, key: Key) -> Key:
+        """Prefix the caller's key and validate what will go on the wire.
+
+        A key too long for memcached is an argument error, raised at the
+        call site like any other, rather than a transport failure to be
+        attributed (or, in degrade mode, silently absorbed) later.
+        """
+        wire: Key
         if isinstance(key, str):
-            return self._prefix + key if self._prefix else key
-        if isinstance(key, bytes):
-            return self._prefix.encode("utf-8") + key if self._prefix else key
-        raise TypeError("key must be str or bytes")
+            wire = self._prefix + key if self._prefix else key
+        elif isinstance(key, bytes):
+            wire = self._prefix.encode("utf-8") + key if self._prefix else key
+        else:
+            raise TypeError("key must be str or bytes")
+        try:
+            encode_key(key_bytes(wire))
+        except MemcacheError as exc:
+            raise ValueError("key %r: %s" % (key, exc)) from None
+        return wire
 
     def _merge_key(self, key: Key) -> bytes:
         return key_bytes(self._wire_key(key))
