@@ -39,11 +39,12 @@ from ..errors import (
 from ..meta_command import MetaCommand, MetaResult
 from ..serialize import Serializer
 from ._core import (
+    DEFAULT_LEASE_TTL,
+    DEFAULT_LEASE_WAIT,
     FOREVER as FOREVER,
     MISSING,
     RAISE,
     UPDATE_ATTEMPTS,
-    WAIT_BACKOFF,
     Call,
     ItemInfo,
     Key,
@@ -489,11 +490,15 @@ class AsyncMemcache(ScenarioBase):
         on_error: str = "raise",
         on_failure: Callable[[BaseException], None] | None = None,
         timeout: float | None = 1.0,
+        lease_ttl: int | timedelta = DEFAULT_LEASE_TTL,
+        lease_wait: float | timedelta = DEFAULT_LEASE_WAIT,
         username: str | None = None,
         password: str | None = None,
         max_idle: int | None = 23,
     ) -> None:
-        super().__init__(serializer, prefix, on_error, on_failure, timeout)
+        super().__init__(
+            serializer, prefix, on_error, on_failure, timeout, lease_ttl, lease_wait
+        )
         self._servers = [
             _Server(addr, username=username, password=password, max_idle=max_idle)
             for addr in normalize_addresses(servers)
@@ -591,8 +596,8 @@ class AsyncMemcache(ScenarioBase):
     async def _settle_call(self, call: Call, outcome: WireOutcome) -> Any:
         try:
             value, win = call.finish(outcome)
-        except OperationFailedError as exc:
-            if call.absorb is not RAISE and self._absorb(exc):
+        except (OperationFailedError, AmbiguousWriteError) as exc:
+            if call.absorb is not RAISE and self._absorb(call.op, exc):
                 return call.absorb
             raise
         if win is not None:
@@ -877,8 +882,11 @@ class AsyncMemcache(ScenarioBase):
         ttl: int,
         refresh_ahead: int | None,
     ) -> Any:
-        op, election = plan_election(self._wire_key(key), key, refresh_ahead)
-        for attempt in range(len(WAIT_BACKOFF) + 1):
+        op, election = plan_election(
+            self._wire_key(key), key, self._lease_ttl, refresh_ahead
+        )
+        backoff = self._wait_backoff
+        for attempt in range(len(backoff) + 1):
             try:
                 view = election(await self._run_one(op))
             except (OperationFailedError, AmbiguousWriteError) as exc:
@@ -906,13 +914,14 @@ class AsyncMemcache(ScenarioBase):
                 # without write-back, merged with any same-process run.
                 return await self._local_compute(key, factory)
             # Another caller holds the lease. Same-process callers share its
-            # pending result; cross-process losers wait briefly and re-read.
+            # pending result; cross-process losers poll for up to the
+            # lease_wait budget and then compute locally.
             flight = self._flights.get(self._merge_key(key))
             if flight is not None:
                 return await flight.wait()
-            if attempt >= len(WAIT_BACKOFF):
+            if attempt >= len(backoff):
                 return await self._local_compute(key, factory)
-            await anyio.sleep(WAIT_BACKOFF[attempt])
+            await anyio.sleep(backoff[attempt])
         raise AssertionError("unreachable")
 
     async def _lead(

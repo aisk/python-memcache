@@ -70,6 +70,8 @@ Memcache(
     on_error="raise",         # or "degrade", see failure policy
     on_failure=None,          # observability hook, defaults to standard logging
     timeout=1.0,              # per-batch deadline in seconds
+    lease_ttl=30,             # how long a factory winner's lease lasts, in seconds
+    lease_wait=5.0,           # how long other processes wait for that winner
     username=None, password=None, max_idle=23,
 )
 ```
@@ -171,7 +173,7 @@ cache.get(key, factory=build, ttl=3600, refresh_ahead=0)   # -> value
 report = cache.get("report:q3", factory=build_report, ttl=3600)
 ```
 
-未命中时，所有进程中只有一个调用者赢得服务端 lease 并运行 factory。同进程内的其他调用者等待这个结果，其他进程短暂等待后本地计算但不写回。因此一个热点 key 在一千个并发请求下过期，代价是一次重算，而不是一千次。
+未命中时，所有进程中只有一个调用者赢得服务端 lease 并运行 factory。同进程内的其他调用者等待这个结果。其他进程轮询等待赢家写回，最多等 `lease_wait`（默认 5 秒），之后本地计算但不写回，所以比这更慢的 factory 会让每个等待中的进程多算一次。把 `lease_wait` 设得比最慢的 factory 更长，或者设为 0 表示从不等待。lease 本身存活 `lease_ttl`（默认 30 秒），赢家在计算途中崩溃后，过了这段时间就失去独占权，下一个读者重新选举。因此一个热点 key 在一千个并发请求下过期，代价是一次重算，而不是一千次。
 
 加上 `refresh_ahead` 后，剩余 ttl 进入窗口的值会被原样返回，同时选出一个调用者重新计算，曲线上永远看不到过期的尖峰：
 
@@ -245,7 +247,7 @@ render(user.value)
 cache = Memcache(*servers, on_error="degrade", on_failure=metrics.count)
 ```
 
-degrade 之下，读操作把故障报告为未命中，带 factory 的 `get` 本地计算但不写回，盲目的写操作（`set`、`delete`、`touch`、`append` 等）静默放弃。结果用于业务判断的方法（`add`、`replace`、`incr`、`decr`、`update`、`pop`）在 degrade 下仍然报错，因为编造一个答案比报错更危险。`AmbiguousWriteError`（写入可能已经生效）总是浮现：degrade 降的是"缓存不可用"，绝不是"不知道写没写进去"。每个被吸收的故障仍然会到达 `on_failure` 钩子（默认走标准 logging），降级业务行为绝不降级可观测性。写入开始后客户端永远不会自动重试命令，因为盲目重试算术或追加可能让变更生效两次。
+degrade 之下，读操作把故障报告为未命中，带 factory 的 `get` 本地计算但不写回，盲目的写操作（`set`、`delete`、`touch`、`append` 等）静默放弃。结果用于业务判断的方法（`add`、`replace`、`incr`、`decr`、`update`、`pop`）在 degrade 下仍然报错，因为编造一个答案比报错更危险。已发送但没有收到确认的写入，如果重复执行无害（`set`、`delete`、`touch`），就和其他故障一样被吸收；如果它可能已经生效且不能安全重复（`incr`、`decr`、`append`、`prepend`），则以 `AmbiguousWriteError` 浮现：degrade 降的是"缓存不可用"，绝不是"不知道变更有没有生效"。每个被吸收的故障仍然会到达 `on_failure` 钩子（默认走标准 logging），降级业务行为绝不降级可观测性。写入开始后客户端永远不会自动重试命令，因为盲目重试算术或追加可能让变更生效两次。
 
 ### 异步客户端
 

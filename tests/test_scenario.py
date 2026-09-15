@@ -17,6 +17,7 @@ from memcache.experiment import (
     PickleSerializer,
     SerializeError,
 )
+from memcache.experiment._core import wait_schedule
 
 ADDR = ("localhost", 11211)
 DEAD_ADDR = ("localhost", 1)
@@ -276,6 +277,114 @@ def test_factory_loser_in_another_process_waits_for_winner(cache):
         never = lambda: pytest.fail("the loser must not recompute")  # noqa: E731
         assert other.get("cross", factory=never, ttl=60) == "winner"
         winner.join()
+
+
+def test_factory_loser_outwaits_a_slow_winner(cache):
+    with Memcache(ADDR, serializer=PickleSerializer()) as other:
+
+        def slow_build():
+            time.sleep(1.2)
+            return "winner"
+
+        winner = threading.Thread(
+            target=lambda: cache.get("cross", factory=slow_build, ttl=60)
+        )
+        winner.start()
+        time.sleep(0.1)
+        # A factory slower than a second still costs one computation: the
+        # default lease_wait budget keeps the loser polling until the
+        # winner's write lands.
+        never = lambda: pytest.fail("the loser must not recompute")  # noqa: E731
+        assert other.get("cross", factory=never, ttl=60) == "winner"
+        winner.join()
+
+
+def test_lease_wait_bounds_the_cross_process_wait(cache):
+    with Memcache(ADDR, serializer=PickleSerializer(), lease_wait=0.2) as other:
+        release = threading.Event()
+
+        def slow_build():
+            release.wait(5)
+            return "winner"
+
+        winner = threading.Thread(
+            target=lambda: cache.get("cross", factory=slow_build, ttl=60)
+        )
+        winner.start()
+        time.sleep(0.1)
+        started = time.monotonic()
+        # Past its budget the loser computes locally without writing back.
+        assert other.get("cross", factory=lambda: "local", ttl=60) == "local"
+        assert 0.2 <= time.monotonic() - started < 1.0
+        release.set()
+        winner.join()
+        assert cache.get("cross") == "winner"
+
+
+def test_lease_wait_zero_never_waits(cache):
+    with Memcache(ADDR, serializer=PickleSerializer(), lease_wait=0) as other:
+        release = threading.Event()
+
+        def slow_build():
+            release.wait(5)
+            return "winner"
+
+        winner = threading.Thread(
+            target=lambda: cache.get("cross", factory=slow_build, ttl=60)
+        )
+        winner.start()
+        time.sleep(0.1)
+        started = time.monotonic()
+        assert other.get("cross", factory=lambda: "local", ttl=60) == "local"
+        assert time.monotonic() - started < 0.1
+        release.set()
+        winner.join()
+
+
+def test_lease_ttl_bounds_the_winner_placeholder(cache):
+    with Memcache(ADDR, serializer=PickleSerializer(), lease_ttl=7) as short:
+        release = threading.Event()
+
+        def slow_build():
+            release.wait(5)
+            return "winner"
+
+        winner = threading.Thread(
+            target=lambda: short.get("leased", factory=slow_build, ttl=60)
+        )
+        winner.start()
+        time.sleep(0.1)
+        # The placeholder the winner holds expires with the client's lease
+        # ttl, so a winner that dies is re-elected after that long.
+        info = cache.inspect("leased")
+        assert info is not None and 5 <= info.ttl <= 7
+        release.set()
+        winner.join()
+
+
+def test_lease_policy_validation():
+    with pytest.raises(ValueError, match="lease_ttl"):
+        Memcache(ADDR, lease_ttl=0)
+    with pytest.raises(TypeError, match="lease_ttl"):
+        Memcache(ADDR, lease_ttl=1.5)
+    with pytest.raises(ValueError, match="lease_wait"):
+        Memcache(ADDR, lease_wait=-1)
+    with pytest.raises(TypeError, match="lease_wait"):
+        Memcache(ADDR, lease_wait="1")
+    Memcache(
+        ADDR, lease_ttl=timedelta(seconds=10), lease_wait=timedelta(milliseconds=50)
+    ).close()
+
+
+def test_wait_schedule_spends_exactly_its_budget():
+    assert wait_schedule(0) == ()
+    assert wait_schedule(0.01) == (0.01,)
+    schedule = wait_schedule(5)
+    assert sum(schedule) == pytest.approx(5)
+    assert schedule[0] == 0.025
+    assert max(schedule) == 0.5
+    # Delays only grow until the last one, which is trimmed to the budget.
+    assert list(schedule[:-1]) == sorted(schedule[:-1])
 
 
 def test_factory_exception_propagates_and_releases_lease(cache):
@@ -684,6 +793,66 @@ def test_raise_mode_surfaces_infrastructure_failures():
             client.get("k")
         with pytest.raises((OperationFailedError, AmbiguousWriteError)):
             client.set("k", "v", ttl=60)
+
+
+def test_raise_mode_surfaces_unacknowledged_writes(hung_addr):
+    with Memcache(hung_addr, timeout=0.2) as client:
+        with pytest.raises(OperationFailedError):
+            client.get("k")
+        with pytest.raises(AmbiguousWriteError):
+            client.set("k", "v", ttl=60)
+
+
+@pytest.fixture()
+def hung_cache(hung_addr):
+    failures: list[BaseException] = []
+    with Memcache(
+        hung_addr,
+        serializer=PickleSerializer(),
+        on_error="degrade",
+        on_failure=failures.append,
+        timeout=0.2,
+    ) as client:
+        client.failures = failures  # type: ignore[attr-defined]
+        yield client
+
+
+def test_degrade_absorbs_unacknowledged_idempotent_writes(hung_cache):
+    # A hung server is the common outage: the write goes out and no answer
+    # comes back. For writes whose repetition is harmless that is just "the
+    # cache is down", so degrade covers them exactly like a refused connection.
+    assert hung_cache.get("k", default="d") == "d"
+    assert hung_cache.get("k", extend_ttl=60) is None
+    assert hung_cache.set("k", "v", ttl=60) is None
+    hung_cache.set_many({"a": 1}, ttl=60)
+    assert hung_cache.delete("k") is False
+    assert hung_cache.delete("k", grace=60) is False
+    hung_cache.delete_many(["k"])
+    assert hung_cache.touch("k", 60) is False
+    assert hung_cache.get("k", factory=lambda: "local", ttl=60) == "local"
+    assert hung_cache.failures
+    assert all(isinstance(f, AmbiguousWriteError) for f in hung_cache.failures[2:])
+
+
+def test_degrade_surfaces_unacknowledged_mutations(hung_cache):
+    # A counter or a concatenation that may have landed cannot be safely
+    # repeated, so its ambiguity is never folded into "the cache is down".
+    for mutate in (
+        lambda: hung_cache.incr("k", ttl=60),
+        lambda: hung_cache.decr("k", ttl=60),
+        lambda: hung_cache.append("k", b"x", ttl=60),
+        lambda: hung_cache.prepend("k", b"x", ttl=60),
+        lambda: hung_cache.add("k", "v", ttl=60),
+        lambda: hung_cache.replace("k", "v", ttl=60),
+    ):
+        with pytest.raises(AmbiguousWriteError):
+            mutate()
+    with hung_cache.pipeline() as p:
+        write = p.set("k", "v", ttl=60)
+        fragment = p.append("k", b"x", ttl=60)
+    assert write.value is None
+    with pytest.raises(AmbiguousWriteError):
+        fragment.value
 
 
 def test_degrade_reads_become_misses(dead_cache):

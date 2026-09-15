@@ -53,17 +53,25 @@ Ttl = int | timedelta | datetime
 """What a lifetime argument accepts: an int or ``timedelta`` duration from
 now, or an aware ``datetime`` naming the absolute moment of expiry."""
 
-LEASE_TTL = 30
-"""How long a miss-path lease placeholder lives, in seconds.
+DEFAULT_LEASE_TTL = 30
+"""Default for the ``lease_ttl`` constructor policy, in seconds.
 
-A crashed winner's exclusive right to recompute expires on its own after
-this long, so a later request re-elects instead of waiting forever.
+A miss-path lease placeholder lives this long, so a crashed winner's
+exclusive right to recompute expires on its own and a later request
+re-elects instead of waiting forever.
 """
 
-WAIT_BACKOFF = (0.025, 0.05, 0.1, 0.2, 0.4)
-"""A loser's cross-process polling schedule while another process's winner
-recomputes. When the schedule is exhausted the caller computes locally
-without writing back."""
+DEFAULT_LEASE_WAIT = 5.0
+"""Default for the ``lease_wait`` constructor policy, in seconds.
+
+How long a cross-process loser keeps polling for the winner's result
+before computing locally without writing back. Every factory slower than
+this costs one extra recomputation per waiting process, so it should
+exceed the slowest factory the client runs.
+"""
+
+_WAIT_FIRST = 0.025
+_WAIT_CAP = 0.5
 
 UPDATE_ATTEMPTS = 8
 """Retry bound for the optimistic concurrency loops in update and pop."""
@@ -113,6 +121,44 @@ def wire_ttl(ttl: Ttl, name: str = "ttl") -> int:
     if seconds > _UNIX_TTL_THRESHOLD:
         return int(time.time()) + seconds
     return seconds
+
+
+def lease_ttl_seconds(lease_ttl: int | timedelta) -> int:
+    """Validate the ``lease_ttl`` policy; the placeholder must expire."""
+    if isinstance(lease_ttl, timedelta):
+        seconds = math.ceil(lease_ttl.total_seconds())
+    elif isinstance(lease_ttl, bool) or not isinstance(lease_ttl, int):
+        raise TypeError("lease_ttl must be an int or timedelta number of seconds")
+    else:
+        seconds = lease_ttl
+    if seconds < 1:
+        raise ValueError("lease_ttl must be at least one second")
+    return seconds
+
+
+def wait_schedule(lease_wait: float | timedelta) -> tuple[float, ...]:
+    """Turn the ``lease_wait`` policy into a loser's polling schedule.
+
+    Delays double from 25ms up to a 500ms cap until their sum reaches the
+    budget; zero means never wait, so a loser computes locally at once.
+    """
+    if isinstance(lease_wait, timedelta):
+        budget = lease_wait.total_seconds()
+    elif isinstance(lease_wait, bool) or not isinstance(lease_wait, (int, float)):
+        raise TypeError("lease_wait must be a number of seconds or a timedelta")
+    else:
+        budget = float(lease_wait)
+    if budget < 0:
+        raise ValueError("lease_wait must not be negative")
+    delays: list[float] = []
+    total = 0.0
+    delay = _WAIT_FIRST
+    while total < budget:
+        delay = min(delay, budget - total)
+        delays.append(delay)
+        total += delay
+        delay = min(delay * 2, _WAIT_CAP)
+    return tuple(delays)
 
 
 def check_refresh_ahead(wire: int, refresh_ahead: int | timedelta | None) -> int | None:
@@ -182,6 +228,14 @@ class WireOp:
     """Whether the success/miss response is suppressed; silence then means
     the settled quiet outcome for the verb (miss for reads, done for
     writes)."""
+    idempotent: bool = True
+    """Whether repeating or losing the command leaves the same end state.
+
+    Decides how far degrade mode reaches: an ambiguous idempotent write is
+    indistinguishable from a lost one for the caller, so both are "the
+    cache is down". A counter or an append that may have landed cannot be
+    safely repeated, so its ambiguity always surfaces.
+    """
 
 
 @dataclass
@@ -586,7 +640,7 @@ def plan_counter(
         )
         raise error
 
-    return WireOp(command, side_effect=True, quiet=False), finish
+    return WireOp(command, side_effect=True, quiet=False, idempotent=False), finish
 
 
 def plan_concat(
@@ -600,7 +654,7 @@ def plan_concat(
             return None, None
         raise _unexpected(key, mode, response)
 
-    return WireOp(command, side_effect=True), finish
+    return WireOp(command, side_effect=True, idempotent=False), finish
 
 
 def plan_inspect(wire_key: Key, key: Key) -> tuple[WireOp, Finish]:
@@ -632,7 +686,7 @@ def plan_inspect(wire_key: Key, key: Key) -> tuple[WireOp, Finish]:
 
 
 def plan_election(
-    wire_key: Key, key: Key, refresh_ahead: int | None
+    wire_key: Key, key: Key, lease_ttl: int, refresh_ahead: int | None
 ) -> tuple[WireOp, Callable[[WireOutcome], ReadView]]:
     """The factory path's combined read and server-side election.
 
@@ -647,7 +701,7 @@ def plan_election(
         return_client_flags=True,
         return_cas=True,
         return_ttl=True,
-        vivify_ttl=LEASE_TTL,
+        vivify_ttl=lease_ttl,
         recache_ttl=refresh_ahead,
     )
 
@@ -695,6 +749,8 @@ class ScenarioBase:
         on_error: str,
         on_failure: Callable[[BaseException], None] | None,
         timeout: float | None,
+        lease_ttl: int | timedelta,
+        lease_wait: float | timedelta,
     ) -> None:
         if on_error not in ("raise", "degrade"):
             raise ValueError("on_error must be 'raise' or 'degrade'")
@@ -705,6 +761,8 @@ class ScenarioBase:
         self._degrade = on_error == "degrade"
         self._on_failure = on_failure
         self._timeout = timeout
+        self._lease_ttl = lease_ttl_seconds(lease_ttl)
+        self._wait_backoff = wait_schedule(lease_wait)
         self._closed = False
 
     # -- keys ----------------------------------------------------------
@@ -732,15 +790,20 @@ class ScenarioBase:
         except Exception:
             logger.exception("memcache on_failure hook raised")
 
-    def _absorb(self, error: Exception) -> bool:
+    def _absorb(self, op: WireOp, error: Exception) -> bool:
         """Whether degrade mode swallows this failure.
 
-        Ambiguous writes never degrade: degrading covers "the cache is
-        down", not "the write may or may not have landed". Absorbed
-        failures go to the failure hook so degrading business behavior
-        never degrades observability.
+        Degrading covers "the cache is down". For an idempotent write that
+        includes "sent but unacknowledged": a set or delete that may have
+        landed is no different to its caller from one that was lost. A
+        non-idempotent write (a counter, an append) that may have landed
+        cannot be safely repeated, so its ambiguity always surfaces.
+        Absorbed failures go to the failure hook so degrading business
+        behavior never degrades observability.
         """
-        if not self._degrade or isinstance(error, AmbiguousWriteError):
+        if not self._degrade:
+            return False
+        if isinstance(error, AmbiguousWriteError) and not op.idempotent:
             return False
         self._report(error)
         return True

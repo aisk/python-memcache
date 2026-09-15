@@ -57,7 +57,7 @@ High-level client based on the meta protocol (experimental)
 
 ``AsyncMemcache`` is the same table of verbs plus ``await``; ``factory`` and ``fn`` accept sync or async callables, and refresh-ahead recomputations run as background tasks when the client is used as an async context manager.
 
-Failure behavior is a constructor policy. The default ``on_error="raise"`` surfaces infrastructure trouble as ``OperationFailedError`` (a sent-but-unacknowledged write raises ``AmbiguousWriteError``, and that never degrades). ``on_error="degrade"`` decouples a cache outage from a site outage: reads become misses, a ``get`` with a factory computes locally, blind writes are dropped silently, while operations whose answer feeds business decisions (``add``, ``replace``, ``incr``, ``update``, ``pop``) still raise. Absorbed failures go to the ``on_failure`` hook.
+Failure behavior is a constructor policy. The default ``on_error="raise"`` surfaces infrastructure trouble as ``OperationFailedError`` (a sent-but-unacknowledged write raises ``AmbiguousWriteError``). ``on_error="degrade"`` decouples a cache outage from a site outage: reads become misses, a ``get`` with a factory computes locally, blind writes are dropped silently even when unacknowledged, while operations whose answer feeds business decisions (``add``, ``replace``, ``incr``, ``update``, ``pop``) still raise, as does an unacknowledged ``incr`` or ``append`` that cannot be safely repeated. Absorbed failures go to the ``on_failure`` hook.
 
 For protocol experts, ``cache.meta`` maps the wire commands one-to-one (``mg``/``ms``/``md``/``ma``/``me``) with one keyword argument per protocol flag. It works on raw bytes and returns lightly parsed responses without serialization or semantic mapping.
 

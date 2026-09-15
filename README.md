@@ -73,6 +73,8 @@ Memcache(
     on_error="raise",         # or "degrade", see failure policy
     on_failure=None,          # observability hook, defaults to standard logging
     timeout=1.0,              # per-batch deadline in seconds
+    lease_ttl=30,             # how long a factory winner's lease lasts, in seconds
+    lease_wait=5.0,           # how long other processes wait for that winner
     username=None, password=None, max_idle=23,
 )
 ```
@@ -174,7 +176,7 @@ The highest frequency cache pattern as one modifier: `default` is the static fal
 report = cache.get("report:q3", factory=build_report, ttl=3600)
 ```
 
-On a miss, one caller across all processes wins a server side lease and runs the factory. Other callers in the same process wait on that result, and other processes wait briefly then compute locally without writing back. So a hot key expiring under a thousand concurrent requests costs one recomputation, not a thousand.
+On a miss, one caller across all processes wins a server side lease and runs the factory. Other callers in the same process wait on that result. Other processes poll for the winner's write for up to `lease_wait` (5 seconds by default) and then compute locally without writing back, so a factory slower than that costs one extra recomputation per waiting process: set `lease_wait` above your slowest factory, or to 0 to never wait. The lease itself lasts `lease_ttl` (30 seconds by default); a winner that dies mid computation loses its exclusive right after that long and the next reader re-elects. So a hot key expiring under a thousand concurrent requests costs one recomputation, not a thousand.
 
 With `refresh_ahead`, a value whose remaining ttl has entered the window is served as is while one elected caller recomputes, so the curve never shows an expiry spike:
 
@@ -248,7 +250,7 @@ By default every infrastructure failure surfaces as an exception (`OperationFail
 cache = Memcache(*servers, on_error="degrade", on_failure=metrics.count)
 ```
 
-Under degrade, reads report failures as misses, a `get` with a factory computes locally without writing back, and blind writes (`set`, `delete`, `touch`, `append`, ...) give up silently. Verbs whose answer feeds a business decision (`add`, `replace`, `incr`, `decr`, `update`, `pop`) keep failing loudly even under degrade, because inventing an answer is worse than failing. An `AmbiguousWriteError` (the write may have landed) always surfaces: degrading covers "the cache is down", never "the write may or may not have happened". Every absorbed failure still reaches the `on_failure` hook (standard logging by default), so degrading business behavior never degrades observability. The client never automatically retries a command after writing begins, since blindly retrying arithmetic or append could apply the mutation twice.
+Under degrade, reads report failures as misses, a `get` with a factory computes locally without writing back, and blind writes (`set`, `delete`, `touch`, `append`, ...) give up silently. Verbs whose answer feeds a business decision (`add`, `replace`, `incr`, `decr`, `update`, `pop`) keep failing loudly even under degrade, because inventing an answer is worse than failing. A write that was sent but never acknowledged is absorbed like any other failure when repeating it would be harmless (`set`, `delete`, `touch`), but surfaces as `AmbiguousWriteError` when it may have landed and cannot be safely repeated (`incr`, `decr`, `append`, `prepend`): degrading covers "the cache is down", never "the mutation may or may not have applied". Every absorbed failure still reaches the `on_failure` hook (standard logging by default), so degrading business behavior never degrades observability. The client never automatically retries a command after writing begins, since blindly retrying arithmetic or append could apply the mutation twice.
 
 ### Async client
 

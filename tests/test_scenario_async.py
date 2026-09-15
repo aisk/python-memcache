@@ -1,11 +1,14 @@
 import asyncio
+import threading
 import time
 
 import pytest
 import pytest_asyncio
 
 from memcache.experiment import (
+    AmbiguousWriteError,
     AsyncMemcache,
+    Memcache,
     NotFoundError,
     OperationFailedError,
     PickleSerializer,
@@ -222,6 +225,54 @@ async def test_degrade_follows_the_table():
         with pytest.raises(OperationFailedError):
             await client.add("k", "v", ttl=60)
     assert failures
+
+
+@pytest.mark.asyncio
+async def test_degrade_absorbs_unacknowledged_idempotent_writes(hung_addr):
+    failures: list[BaseException] = []
+    async with AsyncMemcache(
+        hung_addr,
+        serializer=PickleSerializer(),
+        on_error="degrade",
+        on_failure=failures.append,
+        timeout=0.2,
+    ) as client:
+        assert await client.set("k", "v", ttl=60) is None
+        assert await client.delete("k") is False
+        assert await client.touch("k", 60) is False
+        assert await client.get("k", factory=lambda: "local", ttl=60) == "local"
+        with pytest.raises(AmbiguousWriteError):
+            await client.incr("k", ttl=60)
+        with pytest.raises(AmbiguousWriteError):
+            await client.append("k", b"x", ttl=60)
+    assert failures
+    assert all(isinstance(f, AmbiguousWriteError) for f in failures)
+
+
+@pytest.mark.asyncio
+async def test_lease_wait_bounds_the_cross_process_wait(cache):
+    release = threading.Event()
+
+    def slow_build():
+        release.wait(5)
+        return "winner"
+
+    with Memcache(ADDR, serializer=PickleSerializer()) as other:
+        winner = threading.Thread(
+            target=lambda: other.get("cross", factory=slow_build, ttl=60)
+        )
+        winner.start()
+        await asyncio.sleep(0.1)
+        async with AsyncMemcache(
+            ADDR, serializer=PickleSerializer(), lease_wait=0.2
+        ) as impatient:
+            started = time.monotonic()
+            value = await impatient.get("cross", factory=lambda: "local", ttl=60)
+            assert value == "local"
+            assert 0.2 <= time.monotonic() - started < 1.0
+        release.set()
+        winner.join()
+    assert await cache.get("cross") == "winner"
 
 
 @pytest.mark.asyncio
