@@ -1,7 +1,7 @@
 import socket
 from typing import TypeAlias
 
-from .errors import MemcacheError, PipelineError
+from .errors import CommandError, MemcacheError, PipelineError
 from .meta_command import MetaCommand, MetaResult, ResponseReader
 
 NEWLINE = b"\r\n"
@@ -135,7 +135,10 @@ class Connection:
         # response makes the outcome ambiguous (especially for ms/ma).
         self._set_timeout(timeout)
         self.socket.sendall(command.dump())
-        return self._next_response()
+        result = self._next_response()
+        if result.error is not None:
+            raise CommandError(result.error)
+        return result
 
     def send_pipeline(
         self, commands: list[MetaCommand], timeout: float | None = None

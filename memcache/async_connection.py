@@ -1,7 +1,7 @@
 import anyio
 
 from .connection import RECV_SIZE, Addr, chunk_pipeline
-from .errors import MemcacheError, PipelineError as PipelineError
+from .errors import CommandError, MemcacheError, PipelineError as PipelineError
 from .meta_command import MetaCommand, MetaResult, ResponseReader
 
 
@@ -89,7 +89,10 @@ class AsyncConnection:
             await self._connect()
 
         await self.stream.send(command.dump())
-        return await self._next_response()
+        result = await self._next_response()
+        if result.error is not None:
+            raise CommandError(result.error)
+        return result
 
     async def execute_pipeline(self, commands: list[MetaCommand]) -> list[MetaResult]:
         """Write a quiet pipeline and read through its ``mn`` barrier.

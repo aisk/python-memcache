@@ -85,6 +85,12 @@ class MetaResult:
     datalen: int | None
     flags: list[bytes]
     value: bytes | None
+    error: str | None = None
+    """The server's message when this response is an error line.
+
+    Error lines carry no opaque token, so a pipeline reader keeps them in
+    sequence with the other responses and attributes them by position.
+    """
 
     @property
     def is_barrier(self) -> bool:
@@ -97,9 +103,10 @@ class MetaResult:
 
         rc = parts[0]
         if rc in (b"CLIENT_ERROR", b"SERVER_ERROR"):
-            # Old ascii protocol error.
-            line = line.removeprefix(rc + b" ")
-            raise MemcacheError(line.rstrip().decode("utf-8"))
+            # Old ascii protocol error line; the connection stays usable and
+            # the server goes on processing whatever follows.
+            message = line.removeprefix(rc + b" ").rstrip().decode("utf-8")
+            return MetaResult(rc=rc, datalen=None, flags=[], value=None, error=message)
 
         flags = []
         datalen = None

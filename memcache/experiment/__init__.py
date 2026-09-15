@@ -9,6 +9,7 @@ meta protocol plus a raw ``execute`` escape hatch). Everything under
 
 from ..errors import (
     AmbiguousWriteError,
+    CommandError,
     ConflictError,
     MemcacheError,
     NotFoundError,
@@ -41,6 +42,7 @@ __all__ = [
     "AsyncMemcache",
     "AsyncMetaNamespace",
     "AsyncPipeline",
+    "CommandError",
     "CompressedSerializer",
     "ConflictError",
     "Deferred",

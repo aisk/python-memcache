@@ -25,6 +25,7 @@ import logging
 from ..connection import Addr
 from ..errors import (
     AmbiguousWriteError,
+    CommandError,
     MemcacheError,
     OperationFailedError,
     PipelineError,
@@ -302,21 +303,57 @@ class PipelineRun:
         return cls([], written, 0, error)
 
 
-def _index_responses(
-    responses: Sequence[MetaResult],
-) -> tuple[dict[int, MetaResult], BaseException | None]:
-    by_index: dict[int, MetaResult] = {}
+def _place_responses(
+    group: Sequence[tuple[int, WireOp]], responses: Sequence[MetaResult]
+) -> tuple[dict[int, MetaResult], dict[int, str], BaseException | None]:
+    """Map a run's responses onto positions in the group.
+
+    Answers carry the opaque token of their command. Error lines carry
+    none, but the server answers a connection in command order, so an
+    error line belongs to a command between the answer before it and the
+    answer after it. Within that span it is attributed to the first
+    command that owed an answer (a non-quiet one) when there is one;
+    otherwise every silent command in the span is reported as rejected,
+    over-reporting a definite failure rather than guessing.
+    """
+    position_of = {index: position for position, (index, _) in enumerate(group)}
+    answered: dict[int, MetaResult] = {}
+    rejected: dict[int, str] = {}
     failure: BaseException | None = None
+    spans: list[tuple[int, int, str]] = []
+    pending: list[str] = []
+    cursor = 0
     for response in responses:
+        if response.error is not None:
+            pending.append(response.error)
+            continue
         opaque = response_flags(response.flags).get("opaque")
         if opaque is None:
             failure = ProtocolError("pipeline response omitted opaque token")
             continue
         try:
-            by_index[int(opaque)] = response
-        except ValueError:
+            position = position_of[int(opaque)]
+        except (ValueError, KeyError):
             failure = ProtocolError("invalid opaque token")
-    return by_index, failure
+            continue
+        answered[position] = response
+        spans.extend((cursor, position, message) for message in pending)
+        pending.clear()
+        cursor = position + 1
+    spans.extend((cursor, len(group), message) for message in pending)
+    for start, stop, message in spans:
+        candidates = [
+            position
+            for position in range(start, stop)
+            if position not in answered and position not in rejected
+        ]
+        loud = [position for position in candidates if not group[position][1].quiet]
+        targets = loud[:1] if loud else candidates
+        if not targets:
+            failure = ProtocolError("server error line matches no command: " + message)
+        for position in targets:
+            rejected[position] = message
+    return answered, rejected, failure
 
 
 def resolve_group(
@@ -326,27 +363,29 @@ def resolve_group(
 ) -> None:
     """Attribute one server's run back onto its operations.
 
-    A command that answered is settled from its response. A silent one is a
-    settled quiet outcome when the batch cleared its barrier, when it cleared
-    an earlier chunk's barrier, or when a later command on the same
+    A command that answered is settled from its response, and one the
+    server rejected with an error line is a definite failure. A silent one
+    is a settled quiet outcome when the batch cleared its barrier, when it
+    cleared an earlier chunk's barrier, or when a later command on the same
     connection answered: the server handles a connection's commands in
-    order, so an answer proves everything before it was processed. Any other
-    silence is the failure, ambiguous when the command may have changed
-    server state.
+    order, so an answer proves everything before it was processed. Any
+    other silence is the failure, ambiguous when the command may have
+    changed server state.
     """
-    by_index, index_failure = _index_responses(run.responses)
+    answered, rejected, index_failure = _place_responses(group, run.responses)
     failure = index_failure or run.error
     processed = run.confirmed
-    for position, (index, _) in enumerate(group):
-        if index in by_index:
-            processed = max(processed, position + 1)
+    for position in list(answered) + list(rejected):
+        processed = max(processed, position + 1)
     for position, (index, op) in enumerate(group):
-        raw = by_index.get(index)
+        raw = answered.get(position)
         if raw is not None:
             try:
                 output[index] = WireOutcome(response=parse_meta_result(raw))
             except Exception as exc:
                 output[index] = WireOutcome(error=exc)
+        elif position in rejected:
+            output[index] = WireOutcome(error=CommandError(rejected[position]))
         elif run.error is None or position < processed:
             output[index] = WireOutcome()
         else:
@@ -628,6 +667,11 @@ def plan_counter(
     )
 
     def finish(outcome: WireOutcome) -> tuple[Any, ReadView | None]:
+        if isinstance(outcome.error, CommandError):
+            # The server refuses arithmetic on whatever is stored there: a
+            # value model mismatch at the call site, like storing an object
+            # under the strict serializer, not an infrastructure failure.
+            raise TypeError("key %r is not a counter: %s" % (key, outcome.error))
         response = settle(key, outcome)
         if response is not None and response.rc == b"VA" and response.value:
             try:

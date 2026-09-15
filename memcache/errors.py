@@ -56,6 +56,16 @@ class AmbiguousWriteError(MemcacheError):
         self.result = result
 
 
+class CommandError(MemcacheError):
+    """The server answered a command with an error line.
+
+    A ``CLIENT_ERROR`` or ``SERVER_ERROR`` is a definite answer, not a
+    transport failure: the server processed the command and did not apply
+    it (a counter on a non-numeric value, a value larger than it accepts).
+    The message is the server's own text.
+    """
+
+
 class ProtocolError(MemcacheError):
     """The server returned a malformed or unsupported protocol response."""
 

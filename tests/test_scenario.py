@@ -9,6 +9,7 @@ from memcache.meta_command import MetaCommand
 from memcache.experiment import (
     FOREVER,
     AmbiguousWriteError,
+    CommandError,
     ConflictError,
     ItemInfo,
     JsonSerializer,
@@ -765,6 +766,81 @@ def test_pipeline_attribution_trusts_in_order_processing():
     assert output[1].response is not None
     assert output[2].ambiguous and output[2].error is run.error
     assert not output[3].ambiguous and output[3].error is run.error
+
+
+def test_pipeline_attributes_server_error_lines_by_position():
+    # An error line carries no opaque token; it belongs to a command between
+    # the answers around it, and to the first one that owed an answer.
+    from memcache.experiment._core import (
+        PipelineRun,
+        WireOp,
+        WireOutcome,
+        finalize_outcomes,
+        resolve_group,
+    )
+    from memcache.meta_command import MetaResult
+
+    def op(cm, key, quiet=True):
+        value = b"x" if cm == b"ms" else None
+        command = MetaCommand(cm, key, 1 if value else None, [], value)
+        return WireOp(command, side_effect=cm != b"mg", quiet=quiet)
+
+    ops = list(
+        enumerate(
+            [
+                op(b"ms", b"a"),
+                op(b"ma", b"s", quiet=False),
+                op(b"mg", b"b"),
+                op(b"ms", b"c"),
+            ]
+        )
+    )
+    responses = [
+        MetaResult(b"CLIENT_ERROR", None, [], None, error="cannot increment"),
+        MetaResult(b"VA", 1, [b"O2"], b"v"),
+    ]
+    pending: list[WireOutcome | None] = [None] * 4
+    resolve_group(ops, pending, PipelineRun(responses))
+    output = finalize_outcomes(pending)
+    assert output[0].error is None and output[0].response is None
+    assert isinstance(output[1].error, CommandError) and not output[1].ambiguous
+    assert output[2].response is not None
+    assert output[3].error is None
+
+    # With only quiet commands in the span, every silent one is reported
+    # rejected rather than guessed at.
+    ops = list(enumerate([op(b"ms", b"a"), op(b"ms", b"b")]))
+    pending = [None] * 2
+    resolve_group(ops, pending, PipelineRun([responses[0]]))
+    output = finalize_outcomes(pending)
+    assert all(isinstance(o.error, CommandError) for o in output)
+
+
+def test_server_rejections_are_definite_and_local(cache):
+    cache.set("text", "abc", ttl=60)
+    cache.set("other", "v", ttl=60)
+    with pytest.raises(TypeError, match="not a counter"):
+        cache.incr("text", ttl=60)
+    # The rejection is that operation's own answer: nothing else in the
+    # batch is disturbed, and the connection stays usable.
+    with cache.pipeline() as p:
+        counter = p.incr("text", ttl=60)
+        written = p.set("a", "aval", ttl=60)
+        read = p.get("other")
+        touched = p.touch("other", 600)
+    with pytest.raises(TypeError, match="not a counter"):
+        counter.value
+    assert written.value is None and cache.get("a") == "aval"
+    assert read.value == "v"
+    assert touched.value is True
+    # A value the server will not accept is a definite failure with the
+    # server's message attached, never an ambiguous write.
+    with pytest.raises(OperationFailedError) as info:
+        cache.set("huge", b"x" * (2 * 1024 * 1024), ttl=60)
+    assert isinstance(info.value.__cause__, CommandError)
+    assert cache.get("huge") is None
+    with pytest.raises(CommandError):
+        cache.meta.arithmetic("text", delta=1)
 
 
 def test_pipeline_has_no_multi_round_trip_verbs(cache):

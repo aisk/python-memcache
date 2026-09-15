@@ -276,6 +276,22 @@ async def test_lease_wait_bounds_the_cross_process_wait(cache):
 
 
 @pytest.mark.asyncio
+async def test_server_rejections_are_definite_and_local(cache):
+    await cache.set("text", "abc", ttl=60)
+    await cache.set("other", "v", ttl=60)
+    with pytest.raises(TypeError, match="not a counter"):
+        await cache.incr("text", ttl=60)
+    async with cache.pipeline() as p:
+        counter = p.incr("text", ttl=60)
+        written = p.set("a", "aval", ttl=60)
+        read = p.get("other")
+    with pytest.raises(TypeError, match="not a counter"):
+        counter.value
+    assert written.value is None and await cache.get("a") == "aval"
+    assert read.value == "v"
+
+
+@pytest.mark.asyncio
 async def test_context_manager_closes_client():
     async with AsyncMemcache(ADDR) as client:
         pass

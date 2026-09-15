@@ -247,7 +247,7 @@ render(user.value)
 cache = Memcache(*servers, on_error="degrade", on_failure=metrics.count)
 ```
 
-degrade 之下，读操作把故障报告为未命中，带 factory 的 `get` 本地计算但不写回，盲目的写操作（`set`、`delete`、`touch`、`append` 等）静默放弃。结果用于业务判断的方法（`add`、`replace`、`incr`、`decr`、`update`、`pop`）在 degrade 下仍然报错，因为编造一个答案比报错更危险。已发送但没有收到确认的写入，如果重复执行无害（`set`、`delete`、`touch`），就和其他故障一样被吸收；如果它可能已经生效且不能安全重复（`incr`、`decr`、`append`、`prepend`），则以 `AmbiguousWriteError` 浮现：degrade 降的是"缓存不可用"，绝不是"不知道变更有没有生效"。每个被吸收的故障仍然会到达 `on_failure` 钩子（默认走标准 logging），降级业务行为绝不降级可观测性。写入开始后客户端永远不会自动重试命令，因为盲目重试算术或追加可能让变更生效两次。
+degrade 之下，读操作把故障报告为未命中，带 factory 的 `get` 本地计算但不写回，盲目的写操作（`set`、`delete`、`touch`、`append` 等）静默放弃。结果用于业务判断的方法（`add`、`replace`、`incr`、`decr`、`update`、`pop`）在 degrade 下仍然报错，因为编造一个答案比报错更危险。已发送但没有收到确认的写入，如果重复执行无害（`set`、`delete`、`touch`），就和其他故障一样被吸收；如果它可能已经生效且不能安全重复（`incr`、`decr`、`append`、`prepend`），则以 `AmbiguousWriteError` 浮现：degrade 降的是"缓存不可用"，绝不是"不知道变更有没有生效"。每个被吸收的故障仍然会到达 `on_failure` 钩子（默认走标准 logging），降级业务行为绝不降级可观测性。写入开始后客户端永远不会自动重试命令，因为盲目重试算术或追加可能让变更生效两次。被服务器直接拒绝的命令（对非数字值做计数、值超过服务器接受的大小）是确定的答案而不是歧义：`incr` 和 `decr` 抛 `TypeError`，其他动词抛 `OperationFailedError` 并把服务器的 `CommandError` 挂在 cause 上，同一 pipeline 里的其他操作不受影响。
 
 ### 异步客户端
 
