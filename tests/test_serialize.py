@@ -158,3 +158,16 @@ def test_compressed_serializer_rejects_bad_payloads():
 
     with pytest.raises(ValueError):
         CompressedSerializer(StrictSerializer(), min_size=0)
+
+
+def test_malformed_payloads_are_serialize_errors():
+    # Every value the serializer cannot read reports the same error type,
+    # whatever the underlying codec raised.
+    with pytest.raises(SerializeError):
+        JsonSerializer().load("k", b"{not json", serialize.FLAG_JSON)
+    with pytest.raises(SerializeError):
+        PickleSerializer().load("k", b"\x80\x04garbage", serialize.FLAG_PICKLE)
+    with pytest.raises(SerializeError):
+        StrictSerializer().load("k", b"abc", serialize.FLAG_INT)
+    with pytest.raises(SerializeError):
+        StrictSerializer().load("k", b"\xff", serialize.FLAG_STR)

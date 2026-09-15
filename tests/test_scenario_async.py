@@ -292,6 +292,39 @@ async def test_server_rejections_are_definite_and_local(cache):
 
 
 @pytest.mark.asyncio
+async def test_unreadable_values_follow_the_failure_policy(cache):
+    await cache.set("pickled", {"a": 1}, ttl=60)
+    failures: list[BaseException] = []
+    async with AsyncMemcache(
+        ADDR, on_error="degrade", on_failure=failures.append
+    ) as lenient:
+        assert await lenient.get("pickled", default="d") == "d"
+        assert await lenient.get("pickled", factory=lambda: "local", ttl=60) == "local"
+    assert len(failures) == 2
+    strict = AsyncMemcache(ADDR)
+    with pytest.raises(OperationFailedError):
+        await strict.get("pickled")
+    await strict.close()
+    # A failed read inside a grace window hands its recache token back.
+    await cache.delete("pickled", grace=60)
+    strict = AsyncMemcache(ADDR)
+    with pytest.raises(OperationFailedError):
+        await strict.get("pickled")
+    await strict.close()
+    calls = []
+
+    def rebuild():
+        calls.append(1)
+        return {"a": 2}
+
+    # The async winner serves the current value and recomputes (inline
+    # here, with no task group); the election itself is the proof.
+    assert await cache.get("pickled", factory=rebuild, ttl=60) == {"a": 1}
+    assert calls == [1]
+    assert await cache.get("pickled") == {"a": 2}
+
+
+@pytest.mark.asyncio
 async def test_context_manager_closes_client():
     async with AsyncMemcache(ADDR) as client:
         pass

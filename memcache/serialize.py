@@ -50,10 +50,15 @@ class BaseSerializer:
     def load(self, key: str | bytes, value: bytes, flags: int) -> Any:
         if flags == FLAG_BYTES:
             return value
-        if flags == FLAG_INT:
-            return int(value)
-        if flags == FLAG_STR:
-            return value.decode()
+        try:
+            if flags == FLAG_INT:
+                return int(value)
+            if flags == FLAG_STR:
+                return value.decode()
+        except ValueError as exc:
+            raise SerializeError(
+                "key %r holds a malformed value: %s" % (key, exc)
+            ) from exc
         return self.load_object(key, value, flags)
 
     def dump_object(self, key: str | bytes, value: Any) -> tuple[bytes, int]:
@@ -99,7 +104,12 @@ class PickleSerializer(BaseSerializer):
 
     def load_object(self, key: str | bytes, value: bytes, flags: int) -> Any:
         if flags == FLAG_PICKLE:
-            return pickle.loads(value)
+            try:
+                return pickle.loads(value)
+            except Exception as exc:
+                raise SerializeError(
+                    "key %r holds a value pickle cannot load: %s" % (key, exc)
+                ) from exc
         raise SerializeError(f"Unrecognized flags: {flags}")
 
 
@@ -115,7 +125,12 @@ class JsonSerializer(BaseSerializer):
 
     def load_object(self, key: str | bytes, value: bytes, flags: int) -> Any:
         if flags == FLAG_JSON:
-            return json.loads(value)
+            try:
+                return json.loads(value)
+            except ValueError as exc:
+                raise SerializeError(
+                    "key %r holds malformed JSON: %s" % (key, exc)
+                ) from exc
         raise SerializeError(f"Unrecognized flags: {flags}")
 
 

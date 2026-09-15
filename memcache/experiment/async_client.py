@@ -53,9 +53,11 @@ from ._core import (
     Ttl,
     WireOp,
     WireOutcome,
+    accidental_win,
     dump_value,
     finalize_outcomes,
     key_bytes,
+    load_value,
     normalize_addresses,
     pipeline_command,
     plan_election,
@@ -596,6 +598,9 @@ class AsyncMemcache(ScenarioBase):
         try:
             value, win = call.finish(outcome)
         except OperationFailedError as exc:
+            win = accidental_win(call.key, outcome)
+            if win is not None:
+                await self._return_win(call.key, win)
             if call.absorb is not RAISE and self._absorb(call.op, exc):
                 return call.absorb
             raise
@@ -725,7 +730,7 @@ class AsyncMemcache(ScenarioBase):
             stale_win = view.stale and view.won
             compare_cas = view.cas if view.hit else None
             if view.hit and view.data and not view.stale:
-                current = self._serializer.load(key, view.data, view.client_flags)
+                current = load_value(self._serializer, key, view)
             elif default is MISSING:
                 if stale_win:
                     await self._return_win(key, view)
@@ -772,7 +777,12 @@ class AsyncMemcache(ScenarioBase):
                 error = OperationFailedError(key)
                 error.__cause__ = ProtocolError("read omitted the requested version")
                 raise error
-            value = self._serializer.load(key, view.data, view.client_flags)
+            try:
+                value = load_value(self._serializer, key, view)
+            except OperationFailedError:
+                if view.stale and view.won:
+                    await self._return_win(key, view)
+                raise
             erase_op, erased = plan_erase(wire_key, key, compare_cas=view.cas)
             if erased(await self._run_one(erase_op)):
                 return value
@@ -896,7 +906,20 @@ class AsyncMemcache(ScenarioBase):
                     return await self._local_compute(key, factory)
                 raise
             if view.hit and view.data:
-                value = self._serializer.load(key, view.data, view.client_flags)
+                try:
+                    value = load_value(self._serializer, key, view)
+                except OperationFailedError as exc:
+                    if view.won and view.cas is not None:
+                        # An unreadable value this call was elected to
+                        # refresh: recompute in place, as a miss winner would.
+                        self._report(exc)
+                        return await self._lead(
+                            key, factory, ttl, view.cas, release=False
+                        )
+                    if self._degrade:
+                        self._report(exc)
+                        return await self._local_compute(key, factory)
+                    raise
                 if view.won and view.cas is not None:
                     # Refresh-ahead or stale-grace win: hand the current
                     # value back now and recompute in the background, so no

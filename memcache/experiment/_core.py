@@ -421,11 +421,11 @@ class ReadView:
 _NO_ITEM = ReadView(hit=False, data=None, client_flags=0)
 
 
-def read_view(response: MetaCommandResult | None) -> ReadView:
+def read_view(key: Key, response: MetaCommandResult | None) -> ReadView:
     if response is None or response.rc == b"EN":
         return _NO_ITEM
     if response.rc not in (b"VA", b"HD"):
-        raise ProtocolError("unexpected read response %r" % response.rc)
+        raise _unexpected(key, "read", response)
     return ReadView(
         hit=True,
         data=response.value,
@@ -520,6 +520,34 @@ def _stale_win(view: ReadView) -> ReadView | None:
     return view if view.stale and view.won else None
 
 
+def accidental_win(key: Key, outcome: WireOutcome) -> ReadView | None:
+    """The stale-recache token a read outcome consumed.
+
+    Recoverable straight from the response, so a token is handed back even
+    when interpreting the value failed: a reader that cannot use what it
+    read must not keep the election closed for everyone else.
+    """
+    response = outcome.response
+    if response is None or response.rc not in (b"VA", b"HD"):
+        return None
+    return _stale_win(read_view(key, response))
+
+
+def load_value(serializer: Serializer, key: Key, view: ReadView) -> Any:
+    """Deserialize a hit.
+
+    A value the serializer cannot read makes the entry unusable for this
+    key, which is a failure of the cache rather than an answer, so it is
+    reported as :class:`OperationFailedError` and follows the failure
+    policy like a refused connection would.
+    """
+    assert view.data is not None
+    try:
+        return serializer.load(key, view.data, view.client_flags)
+    except Exception as exc:
+        raise OperationFailedError(key) from exc
+
+
 def _unexpected(key: Key, what: str, response: MetaCommandResult) -> Exception:
     error = OperationFailedError(key)
     error.__cause__ = ProtocolError("unexpected %s response %r" % (what, response.rc))
@@ -539,7 +567,7 @@ def plan_probe(
     )
 
     def finish(outcome: WireOutcome) -> ReadView:
-        return read_view(settle(key, outcome))
+        return read_view(key, settle(key, outcome))
 
     return WireOp(command, side_effect=False), finish
 
@@ -561,13 +589,13 @@ def plan_get(
     )
 
     def finish(outcome: WireOutcome) -> tuple[Any, ReadView | None]:
-        view = read_view(settle(key, outcome))
+        view = read_view(key, settle(key, outcome))
         win = _stale_win(view)
         if not view.hit or not view.data:
             # A miss, a coordination placeholder, or a genuinely empty
             # entry: the zero-byte rule folds them all to the default.
             return default, win
-        return serializer.load(key, view.data, view.client_flags), win
+        return load_value(serializer, key, view), win
 
     return WireOp(command, side_effect=extend_ttl is not None), finish
 
@@ -642,7 +670,7 @@ def plan_touch(wire_key: Key, key: Key, ttl: int) -> tuple[WireOp, Finish]:
     )
 
     def finish(outcome: WireOutcome) -> tuple[Any, ReadView | None]:
-        view = read_view(settle(key, outcome))
+        view = read_view(key, settle(key, outcome))
         return view.hit, _stale_win(view)
 
     return WireOp(command, side_effect=True), finish
@@ -714,7 +742,7 @@ def plan_inspect(wire_key: Key, key: Key) -> tuple[WireOp, Finish]:
     )
 
     def finish(outcome: WireOutcome) -> tuple[Any, ReadView | None]:
-        view = read_view(settle(key, outcome))
+        view = read_view(key, settle(key, outcome))
         win = _stale_win(view)
         if not view.hit:
             return None, win
@@ -750,7 +778,7 @@ def plan_election(
     )
 
     def finish(outcome: WireOutcome) -> ReadView:
-        return read_view(settle(key, outcome))
+        return read_view(key, settle(key, outcome))
 
     return WireOp(command, side_effect=True), finish
 

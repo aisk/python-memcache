@@ -46,9 +46,11 @@ from ._core import (
     Ttl as Ttl,
     WireOp,
     WireOutcome,
+    accidental_win,
     dump_value,
     finalize_outcomes,
     key_bytes,
+    load_value,
     normalize_addresses,
     pipeline_command,
     plan_election,
@@ -686,15 +688,25 @@ class Memcache(ScenarioBase):
         try:
             value, win = call.finish(outcome)
         except OperationFailedError as exc:
+            self._collect_win(call.key, accidental_win(call.key, outcome), wins)
             if call.absorb is not RAISE and self._absorb(call.op, exc):
                 return call.absorb
             raise
-        if win is not None:
-            if wins is None:
-                self._return_wins([(call.key, win)])
-            else:
-                wins.append((call.key, win))
+        self._collect_win(call.key, win, wins)
         return value
+
+    def _collect_win(
+        self,
+        key: Key,
+        win: ReadView | None,
+        wins: list[tuple[Key, ReadView]] | None,
+    ) -> None:
+        if win is None:
+            return
+        if wins is None:
+            self._return_wins([(key, win)])
+        else:
+            wins.append((key, win))
 
     def _run_call(self, call: Call) -> Any:
         return self._settle_call(call, self._run_one(call.op))
@@ -853,7 +865,7 @@ class Memcache(ScenarioBase):
             # exists: only a compare-and-swap write can replace it.
             compare_cas = view.cas if view.hit else None
             if view.hit and view.data and not view.stale:
-                current = self._serializer.load(key, view.data, view.client_flags)
+                current = load_value(self._serializer, key, view)
             elif default is MISSING:
                 if stale_win:
                     self._return_win(key, view)
@@ -906,7 +918,12 @@ class Memcache(ScenarioBase):
                 error = OperationFailedError(key)
                 error.__cause__ = ProtocolError("read omitted the requested version")
                 raise error
-            value = self._serializer.load(key, view.data, view.client_flags)
+            try:
+                value = load_value(self._serializer, key, view)
+            except OperationFailedError:
+                if view.stale and view.won:
+                    self._return_win(key, view)
+                raise
             erase_op, erased = plan_erase(wire_key, key, compare_cas=view.cas)
             if erased(self._run_one(erase_op)):
                 return value
@@ -1046,7 +1063,13 @@ class Memcache(ScenarioBase):
                     # who pays how much latency stays predictable because
                     # this client owns no threads.
                     return self._lead(key, factory, ttl, view.cas, release=False)
-                return self._serializer.load(key, view.data, view.client_flags)
+                try:
+                    return load_value(self._serializer, key, view)
+                except OperationFailedError as exc:
+                    if self._degrade:
+                        self._report(exc)
+                        return self._local_compute(key, factory)
+                    raise
             if view.hit and view.cas is not None and (view.won or not view.busy):
                 # The vivified placeholder this call won, or a zero-byte
                 # entry nobody else is rewriting: recompute and replace it

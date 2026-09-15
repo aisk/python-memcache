@@ -974,6 +974,52 @@ def test_degrade_surfaces_unacknowledged_mutations(hung_cache):
         fragment.value
 
 
+def test_unreadable_values_follow_the_failure_policy(cache):
+    # A value this client's serializer cannot read is a failure of the
+    # cache for that key, not an answer: it is wrapped, so the degrade
+    # policy and the failure hook apply exactly as for a dead server.
+    cache.set("pickled", {"a": 1}, ttl=60)
+    with Memcache(ADDR) as strict:
+        with pytest.raises(OperationFailedError) as info:
+            strict.get("pickled")
+        assert isinstance(info.value.__cause__, SerializeError)
+        with pytest.raises(OperationFailedError):
+            strict.pop("pickled")
+        with pytest.raises(OperationFailedError):
+            strict.update("pickled", lambda v: v, ttl=60)
+        with pytest.raises(OperationFailedError):
+            strict.get("pickled", factory=lambda: "fresh", ttl=60)
+    failures: list[BaseException] = []
+    with Memcache(ADDR, on_error="degrade", on_failure=failures.append) as lenient:
+        assert lenient.get("pickled", default="d") == "d"
+        assert lenient.get_many(["pickled"]) == {}
+        assert lenient.get("pickled", factory=lambda: "local", ttl=60) == "local"
+        with lenient.pipeline() as p:
+            read = p.get("pickled", "d")
+        assert read.value == "d"
+    assert len(failures) == 4
+    assert all(isinstance(f.__cause__, SerializeError) for f in failures)
+
+
+def test_unreadable_stale_value_returns_the_recache_token(cache):
+    cache.set("article", {"v": 1}, ttl=600)
+    cache.delete("article", grace=60)
+    with Memcache(ADDR) as strict:
+        # This read wins the grace period's single recache token and then
+        # fails to deserialize; the token must go back or the factory
+        # election stays closed for the rest of the window.
+        with pytest.raises(OperationFailedError):
+            strict.get("article")
+    calls = []
+
+    def rebuild():
+        calls.append(1)
+        return {"v": 2}
+
+    assert cache.get("article", factory=rebuild, ttl=600) == {"v": 2}
+    assert calls == [1]
+
+
 def test_degrade_reads_become_misses(dead_cache):
     assert dead_cache.get("k") is None
     assert dead_cache.get("k", default="d") == "d"
