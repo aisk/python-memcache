@@ -173,7 +173,7 @@ cache.get(key, factory=build, ttl=3600, refresh_ahead=0)   # -> value
 report = cache.get("report:q3", factory=build_report, ttl=3600)
 ```
 
-未命中时，所有进程中只有一个调用者赢得服务端 lease 并运行 factory。同进程内的其他调用者等待这个结果。其他进程轮询等待赢家写回，最多等 `lease_wait`（默认 5 秒），之后本地计算但不写回，所以比这更慢的 factory 会让每个等待中的进程多算一次。把 `lease_wait` 设得比最慢的 factory 更长，或者设为 0 表示从不等待。lease 本身存活 `lease_ttl`（默认 30 秒），未命中路径的赢家在计算途中崩溃后，过了这段时间就失去独占权，下一个读者重新选举；refresh_ahead 或宽限期内当选的赢家如果 factory 失败，当前值会一直提供到窗口结束。赢家计算期间，这个 key 在服务器上是一个 0 字节的 lease 占位符：读操作、`inspect` 和 `touch` 把它当作不存在，但盲目的条件写（`add`、`replace`、`append`、`prepend`）会看到一个已存在的条目，所以 factory 管理的 key 和盲写的 key 应当是不同的键族。因此一个热点 key 在一千个并发请求下过期，代价是一次重算，而不是一千次。
+未命中时，所有进程中只有一个调用者赢得服务端 lease 并运行 factory。同进程内的其他调用者等待这个结果。其他进程轮询等待赢家写回，最多等 `lease_wait`（默认 5 秒），之后本地计算但不写回，所以比这更慢的 factory 会让每个等待中的进程多算一次。把 `lease_wait` 设得比最慢的 factory 更长，或者设为 0 表示从不等待。lease 本身存活 `lease_ttl`（默认 30 秒），未命中路径的赢家在计算途中崩溃后，过了这段时间就失去独占权，下一个读者重新选举；宽限期内当选的赢家如果 factory 失败，会交还这次当选，下一个带 factory 的读者重新当选；refresh_ahead 当选的赢家如果 factory 失败，当前值会一直提供到过期。赢家计算期间，这个 key 在服务器上是一个 0 字节的 lease 占位符：读操作、`inspect` 和 `touch` 把它当作不存在，但盲目的条件写（`add`、`replace`、`append`、`prepend`）会看到一个已存在的条目，所以 factory 管理的 key 和盲写的 key 应当是不同的键族。因此一个热点 key 在一千个并发请求下过期，代价是一次重算，而不是一千次。
 
 加上 `refresh_ahead` 后，剩余 ttl 进入窗口的值会被原样返回，同时选出一个调用者重新计算，曲线上永远看不到过期的尖峰：
 

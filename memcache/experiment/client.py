@@ -12,6 +12,7 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import timedelta
 from time import monotonic
 from typing import Any, cast
@@ -521,7 +522,14 @@ class Pipeline:
 
     def _execute(self) -> None:
         self._done = True
-        outcomes = self._client._run_ops([call.op for call in self._calls])
+        try:
+            outcomes = self._client._run_ops([call.op for call in self._calls])
+        except BaseException as error:
+            # The batch never ran, so every deferred reports the cause rather
+            # than claiming its result is still on the way.
+            for deferred in self._results:
+                deferred._error = error
+            raise
         wins: list[tuple[Key, ReadView]] = []
         for call, outcome, deferred in zip(self._calls, outcomes, self._results):
             try:
@@ -864,6 +872,10 @@ class Memcache(ScenarioBase):
             # A stale or zero-byte hit reads as a miss, but the entry still
             # exists: only a compare-and-swap write can replace it.
             compare_cas = view.cas if view.hit else None
+            if view.hit and compare_cas is None:
+                error = OperationFailedError(key)
+                error.__cause__ = ProtocolError("read omitted the requested version")
+                raise error
             if view.hit and view.data and not view.stale:
                 current = load_value(self._serializer, key, view)
             elif default is MISSING:
@@ -903,7 +915,10 @@ class Memcache(ScenarioBase):
 
         The read and the delete are fenced by the entry's version, so bytes
         appended in between are never lost: a conflicting write makes pop
-        read again instead of deleting data it has not returned.
+        read again instead of deleting data it has not returned. An entry
+        kept stale by ``delete(grace=...)`` is still taken: pop drains
+        what was collected rather than recomputing anything, so unlike
+        :meth:`update` it has no reason to treat stale as a miss.
         """
         self._check_open()
         wire_key = self._wire_key(key)
@@ -1061,8 +1076,10 @@ class Memcache(ScenarioBase):
                     # Refresh-ahead or stale-grace win. The synchronous
                     # winner recomputes now and returns the fresh value;
                     # who pays how much latency stays predictable because
-                    # this client owns no threads.
-                    return self._lead(key, factory, ttl, view.cas, release=False)
+                    # this client owns no threads. An unreadable value is
+                    # recomputed the same way: the election is this call's
+                    # to honor whether or not it could use what it read.
+                    return self._lead(key, factory, ttl, view, release=False)
                 try:
                     return load_value(self._serializer, key, view)
                 except OperationFailedError as exc:
@@ -1074,7 +1091,7 @@ class Memcache(ScenarioBase):
                 # The vivified placeholder this call won, or a zero-byte
                 # entry nobody else is rewriting: recompute and replace it
                 # through its version.
-                return self._lead(key, factory, ttl, view.cas, release=True)
+                return self._lead(key, factory, ttl, view, release=True)
             if not view.hit:
                 # A miss despite vivify offers no coordination; compute
                 # without write-back, merged with any same-process run.
@@ -1096,29 +1113,40 @@ class Memcache(ScenarioBase):
         key: Key,
         factory: Callable[[], Any],
         ttl: int,
-        cas: int,
+        view: ReadView,
         release: bool,
     ) -> Any:
         """Run the factory as the elected winner and publish the result.
 
         The factory's own exception propagates to every merged caller; only
-        write-back failures are diverted to the failure hook. When nothing
-        gets written back on the miss path, the placeholder that granted
-        the lease is released so the next reader re-elects immediately.
+        write-back failures are diverted to the failure hook. A caller the
+        server elected while a same-process run for the key is already in
+        flight shares that run's value and still pays for its own election
+        by writing the value back through the version it holds; the run it
+        joined may have been a local compute that writes nothing, and its
+        placeholder would otherwise keep every later reader waiting until
+        the lease expires. Whenever no write-back lands, the election is
+        undone (see :meth:`_undo_election`).
         """
+        assert view.cas is not None
         merge_key = self._merge_key(key)
         flight, leader = self._claim_flight(merge_key)
-        if not leader:
-            return flight.wait()
+        if leader:
+            try:
+                value = factory()
+            except BaseException as exc:
+                self._finish_flight(merge_key, flight, error=exc)
+                self._undo_election(key, view, release)
+                raise
+            self._write_back(key, value, ttl, view, release)
+            self._finish_flight(merge_key, flight, value=value)
+            return value
         try:
-            value = factory()
-        except BaseException as exc:
-            self._finish_flight(merge_key, flight, error=exc)
-            if release:
-                self._release_lease(key, cas)
+            value = flight.wait()
+        except BaseException:
+            self._undo_election(key, view, release)
             raise
-        self._write_back(key, value, ttl, cas, release)
-        self._finish_flight(merge_key, flight, value=value)
+        self._write_back(key, value, ttl, view, release)
         return value
 
     def _local_compute(self, key: Key, factory: Callable[[], Any]) -> Any:
@@ -1136,7 +1164,7 @@ class Memcache(ScenarioBase):
         return value
 
     def _write_back(
-        self, key: Key, value: Any, ttl: int, cas: int, release: bool
+        self, key: Key, value: Any, ttl: int, view: ReadView, release: bool
     ) -> None:
         """Store a recomputed value conditioned on the election's version.
 
@@ -1144,22 +1172,24 @@ class Memcache(ScenarioBase):
         delete, a set, or another invalidation; an unconditional write
         would resurrect dead data, so a rejected write is abandoned. No
         write-back failure changes what get() returns; they are
-        observability events.
+        observability events. A write that never reached the server
+        leaves the election unpaid, so it is undone like a factory failure.
         """
+        assert view.cas is not None
         try:
             raw, client_flags = dump_value(self._serializer, key, value)
         except Exception as exc:
             self._report(exc)
-            if release:
-                self._release_lease(key, cas)
+            self._undo_election(key, view, release)
             return
         op, stored = plan_store(
-            self._wire_key(key), key, raw, client_flags, ttl, compare_cas=cas
+            self._wire_key(key), key, raw, client_flags, ttl, compare_cas=view.cas
         )
         try:
             applied = stored(self._run_one(op))
         except Exception as exc:
             self._report(exc)
+            self._undo_election(key, view, release)
             return
         if not applied:
             self._report(
@@ -1168,6 +1198,24 @@ class Memcache(ScenarioBase):
                     "during recomputation" % (key,)
                 )
             )
+
+    def _undo_election(self, key: Key, view: ReadView, release: bool) -> None:
+        """Give an election back when nothing was written for it.
+
+        A miss-path placeholder is deleted so the next reader re-elects
+        immediately instead of waiting out the lease; a stale entry's
+        recache token is handed back so another factory reader can be
+        elected for the rest of the grace period. A refresh-ahead token
+        has nothing to give back: the entry keeps serving and expires on
+        its own schedule.
+        """
+        assert view.cas is not None
+        if release:
+            self._release_lease(key, view.cas)
+        elif view.stale:
+            # The remaining ttl is left alone: the election's own reading
+            # of it has aged by a whole factory run.
+            self._return_win(key, replace(view, ttl=None))
 
     def _release_lease(self, key: Key, cas: int) -> None:
         """Delete the zero-byte placeholder whose lease went unpaid.

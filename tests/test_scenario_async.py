@@ -110,6 +110,111 @@ async def test_factory_exception_reaches_waiters_and_releases_lease(cache):
 
 
 @pytest.mark.asyncio
+async def test_elected_follower_writes_the_shared_value_back():
+    async with AsyncMemcache(
+        ADDR, serializer=PickleSerializer(), lease_wait=0.3
+    ) as cache:
+        await cache.flush_all()
+        release = asyncio.Event()
+        calls = []
+
+        async def slow_build():
+            calls.append(1)
+            await release.wait()
+            return "shared"
+
+        winner = asyncio.ensure_future(cache.get("k", factory=slow_build, ttl=60))
+        await asyncio.sleep(0.1)
+        # The winner's placeholder disappears under it, so the next reader
+        # here wins a fresh lease while the first factory is still running.
+        await cache.delete("k")
+        follower = asyncio.ensure_future(cache.get("k", factory=slow_build, ttl=60))
+        await asyncio.sleep(0.1)
+        release.set()
+        assert await winner == "shared"
+        assert await follower == "shared"
+        assert calls == [1]
+        await asyncio.sleep(0.1)
+        # The follower paid for its lease with the shared value.
+        assert await cache.get("k") == "shared"
+        start = time.monotonic()
+        assert await cache.get("k", factory=lambda: "cold", ttl=60) == "shared"
+        assert time.monotonic() - start < 0.2
+
+
+@pytest.mark.asyncio
+async def test_stale_refresh_failure_returns_the_recache_token(cache):
+    await cache.set("article", "v1", ttl=600)
+    await cache.delete("article", grace=60)
+
+    def boom():
+        raise RuntimeError("factory failed")
+
+    # Without a task group the refresh runs inline and fails as an
+    # observability event; its token goes back so the next factory reader
+    # is elected.
+    assert await cache.get("article", factory=boom, ttl=600) == "v1"
+    calls = []
+
+    def rebuild():
+        calls.append(1)
+        return "v2"
+
+    assert await cache.get("article", factory=rebuild, ttl=600) == "v1"
+    assert calls == [1]
+    assert await cache.get("article") == "v2"
+
+
+@pytest.mark.asyncio
+async def test_background_refresh_failure_returns_the_recache_token():
+    async with AsyncMemcache(ADDR, serializer=PickleSerializer()) as cache:
+        await cache.flush_all()
+        await cache.set("article", "v1", ttl=600)
+        await cache.delete("article", grace=60)
+
+        def boom():
+            raise RuntimeError("factory failed")
+
+        assert await cache.get("article", factory=boom, ttl=600) == "v1"
+        await asyncio.sleep(0.2)
+        calls = []
+
+        def rebuild():
+            calls.append(1)
+            return "v2"
+
+        # The failed background refresh handed its token back, so this
+        # reader is elected and refreshes in the background.
+        assert await cache.get("article", factory=rebuild, ttl=600) == "v1"
+        await asyncio.sleep(0.2)
+        assert calls == [1]
+        assert await cache.get("article") == "v2"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_caller_does_not_strand_the_flight(cache, monkeypatch):
+    run_one = AsyncMemcache._run_one
+
+    async def slow_store(self, op):
+        if op.command.cm == b"ms":
+            await asyncio.sleep(0.5)
+        return await run_one(self, op)
+
+    monkeypatch.setattr(AsyncMemcache, "_run_one", slow_store)
+    # Inline mode: the factory and its write-back run inside the caller.
+    # Cancelling the caller mid write-back must still resolve the flight,
+    # or every later factory read of the key waits on it forever.
+    task = asyncio.ensure_future(cache.get("k", factory=lambda: "v", ttl=60))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.wait_for(
+        cache.get("k", factory=lambda: "later", ttl=60), 2
+    ) in ("v", "later")
+
+
+@pytest.mark.asyncio
 async def test_refresh_ahead_returns_current_value_and_recomputes_in_background():
     async with AsyncMemcache(ADDR, serializer=PickleSerializer()) as cache:
         await cache.flush_all()

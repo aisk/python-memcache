@@ -443,6 +443,46 @@ def test_factory_exception_propagates_and_releases_lease(cache):
     assert time.monotonic() - start < 0.5
 
 
+def test_elected_follower_writes_the_shared_value_back(cache):
+    with Memcache(ADDR, serializer=PickleSerializer(), lease_wait=0.3) as short:
+        release = threading.Event()
+        calls = []
+
+        def slow_build():
+            calls.append(1)
+            release.wait(5)
+            return "shared"
+
+        winner = threading.Thread(
+            target=lambda: short.get("k", factory=slow_build, ttl=60)
+        )
+        winner.start()
+        time.sleep(0.1)
+        # The winner's placeholder disappears under it (an operator delete,
+        # or a lease that expired before a slow factory finished), so the
+        # next same-process reader wins a fresh lease of its own while the
+        # first factory is still running.
+        cache.delete("k")
+        results = []
+        follower = threading.Thread(
+            target=lambda: results.append(short.get("k", factory=slow_build, ttl=60))
+        )
+        follower.start()
+        time.sleep(0.1)
+        release.set()
+        winner.join()
+        follower.join()
+        assert results == ["shared"]
+        assert calls == [1]
+        # The follower shared the winner's value and paid for its own lease
+        # with it, so the cache is warm instead of holding a placeholder
+        # that makes every reader wait out lease_wait until it expires.
+        assert cache.get("k") == "shared"
+        start = time.monotonic()
+        assert short.get("k", factory=lambda: "cold", ttl=60) == "shared"
+        assert time.monotonic() - start < 0.2
+
+
 def test_factory_write_back_is_conditional(cache):
     failures: list[BaseException] = []
     cache._on_failure = failures.append
@@ -501,6 +541,29 @@ def test_soft_delete_elects_factory_reader_to_refresh(cache):
     cache.set("article", "v1", ttl=600)
     cache.delete("article", grace=60)
     assert cache.get("article", factory=lambda: "v2", ttl=600) == "v2"
+    assert cache.get("article") == "v2"
+
+
+def test_stale_winner_failure_returns_the_recache_token(cache):
+    cache.set("article", "v1", ttl=600)
+    cache.delete("article", grace=60)
+
+    def boom():
+        raise RuntimeError("factory failed")
+
+    with pytest.raises(RuntimeError, match="factory failed"):
+        cache.get("article", factory=boom, ttl=600)
+    assert cache.get("article") == "v1"
+    calls = []
+
+    def rebuild():
+        calls.append(1)
+        return "v2"
+
+    # The failed winner handed its token back, so the next factory reader
+    # is elected instead of everyone serving v1 for the rest of the grace.
+    assert cache.get("article", factory=rebuild, ttl=600) == "v2"
+    assert calls == [1]
     assert cache.get("article") == "v2"
 
 
@@ -775,6 +838,15 @@ def test_pipeline_semantic_outcomes_are_per_operation(cache):
     assert miss.value == "fallback"
     assert not_replaced.value is False
     assert deleted.value is False
+
+
+def test_pipeline_execution_failure_reaches_every_deferred(cache):
+    with pytest.raises(RuntimeError, match="closed"):
+        with cache.pipeline() as p:
+            read = p.get("k")
+            cache.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        read.value
 
 
 def test_pipeline_body_exception_skips_execution(cache):

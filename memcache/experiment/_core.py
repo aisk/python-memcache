@@ -714,10 +714,14 @@ def plan_counter(
     )
 
     def finish(outcome: WireOutcome) -> tuple[Any, ReadView | None]:
-        if isinstance(outcome.error, CommandError):
+        if isinstance(outcome.error, CommandError) and "non-numeric" in str(
+            outcome.error
+        ):
             # The server refuses arithmetic on whatever is stored there: a
             # value model mismatch at the call site, like storing an object
             # under the strict serializer, not an infrastructure failure.
+            # Any other rejection is the server refusing the command itself
+            # and follows the failure policy through settle.
             raise TypeError("key %r is not a counter: %s" % (key, outcome.error))
         response = settle(key, outcome)
         if response is not None and response.rc == b"VA" and response.value:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import deque
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import timedelta
 from inspect import isawaitable
 from typing import Any, cast
@@ -431,7 +432,14 @@ class AsyncPipeline:
 
     async def _execute(self) -> None:
         self._done = True
-        outcomes = await self._client._run_ops([call.op for call in self._calls])
+        try:
+            outcomes = await self._client._run_ops([call.op for call in self._calls])
+        except BaseException as error:
+            # The batch never ran, so every deferred reports the cause rather
+            # than claiming its result is still on the way.
+            for deferred in self._results:
+                deferred._error = error
+            raise
         for call, outcome, deferred in zip(self._calls, outcomes, self._results):
             try:
                 deferred._value = await self._client._settle_call(call, outcome)
@@ -729,6 +737,10 @@ class AsyncMemcache(ScenarioBase):
             view = probe(await self._run_one(probe_op))
             stale_win = view.stale and view.won
             compare_cas = view.cas if view.hit else None
+            if view.hit and compare_cas is None:
+                error = OperationFailedError(key)
+                error.__cause__ = ProtocolError("read omitted the requested version")
+                raise error
             if view.hit and view.data and not view.stale:
                 current = load_value(self._serializer, key, view)
             elif default is MISSING:
@@ -913,9 +925,7 @@ class AsyncMemcache(ScenarioBase):
                         # An unreadable value this call was elected to
                         # refresh: recompute in place, as a miss winner would.
                         self._report(exc)
-                        return await self._lead(
-                            key, factory, ttl, view.cas, release=False
-                        )
+                        return await self._lead(key, factory, ttl, view, release=False)
                     if self._degrade:
                         self._report(exc)
                         return await self._local_compute(key, factory)
@@ -924,13 +934,13 @@ class AsyncMemcache(ScenarioBase):
                     # Refresh-ahead or stale-grace win: hand the current
                     # value back now and recompute in the background, so no
                     # request pays the refresh latency.
-                    await self._refresh(key, factory, ttl, view.cas)
+                    await self._refresh(key, factory, ttl, view)
                 return value
             if view.hit and view.cas is not None and (view.won or not view.busy):
                 # The vivified placeholder this call won, or a zero-byte
                 # entry nobody else is rewriting: recompute and replace it
                 # through its version.
-                return await self._lead(key, factory, ttl, view.cas, release=True)
+                return await self._lead(key, factory, ttl, view, release=True)
             if not view.hit:
                 # A miss despite vivify offers no coordination; compute
                 # without write-back, merged with any same-process run.
@@ -951,7 +961,7 @@ class AsyncMemcache(ScenarioBase):
         key: Key,
         factory: Callable[[], Any],
         ttl: int,
-        cas: int,
+        view: ReadView,
         release: bool,
     ) -> Any:
         """Run the factory as the elected miss-path winner.
@@ -960,14 +970,46 @@ class AsyncMemcache(ScenarioBase):
         the winning caller's cancel scope: its result is shared by every
         same-process waiter, and one short-deadline caller must not cancel
         it for everyone. Each waiter's own cancellation only ends its wait.
+        A caller the server elected while a run for the key is already in
+        flight here shares that run's value and still pays for its own
+        election by writing the value back through the version it holds
+        (see :meth:`_follow`).
         """
         merge_key = self._merge_key(key)
         flight, leader = self._claim_flight(merge_key)
-        if leader and not self._spawn(
-            self._run_load, key, merge_key, flight, factory, ttl, cas, release
+        if not leader:
+            return await self._follow(key, flight, ttl, view, release)
+        if not self._spawn(
+            self._run_load, key, merge_key, flight, factory, ttl, view, release
         ):
-            await self._run_load(key, merge_key, flight, factory, ttl, cas, release)
+            await self._run_load(key, merge_key, flight, factory, ttl, view, release)
         return await flight.wait()
+
+    async def _follow(
+        self,
+        key: Key,
+        flight: _AsyncFlight,
+        ttl: int,
+        view: ReadView,
+        release: bool,
+    ) -> Any:
+        """Share an in-flight run's value and pay this caller's election.
+
+        The run joined may be a local compute that writes nothing, or a
+        load whose own version is already stale, so the value is written
+        back through this election's version; if the run fails, the
+        election is undone instead of leaving its placeholder or token
+        consumed until it expires.
+        """
+        try:
+            value = await flight.wait()
+        except BaseException:
+            with anyio.CancelScope(shield=True):
+                await self._undo_election(key, view, release)
+            raise
+        with anyio.CancelScope(shield=True):
+            await self._write_back(key, value, ttl, view, release)
+        return value
 
     async def _run_load(
         self,
@@ -976,7 +1018,7 @@ class AsyncMemcache(ScenarioBase):
         flight: _AsyncFlight,
         factory: Callable[[], Any],
         ttl: int,
-        cas: int,
+        view: ReadView,
         release: bool,
     ) -> None:
         try:
@@ -989,27 +1031,49 @@ class AsyncMemcache(ScenarioBase):
                 else exc
             )
             self._finish_flight(merge_key, flight, error=published)
-            if release:
-                with anyio.CancelScope(shield=True):
-                    await self._release_lease(key, cas)
+            with anyio.CancelScope(shield=True):
+                await self._undo_election(key, view, release)
             if cancelled:
                 raise
             return
-        await self._write_back(key, value, ttl, cas, release)
+        try:
+            with anyio.CancelScope(shield=True):
+                await self._write_back(key, value, ttl, view, release)
+        except BaseException:
+            # A native task cancellation, which no shield stops, cut the
+            # write-back short. The value exists, so every waiter still
+            # gets it, and the election goes back so the next reader does
+            # not wait out an unpaid placeholder or token.
+            self._finish_flight(merge_key, flight, value=value)
+            with anyio.CancelScope(shield=True):
+                await self._undo_election(key, view, release)
+            raise
         self._finish_flight(merge_key, flight, value=value)
 
     async def _refresh(
-        self, key: Key, factory: Callable[[], Any], ttl: int, cas: int
+        self, key: Key, factory: Callable[[], Any], ttl: int, view: ReadView
     ) -> None:
         merge_key = self._merge_key(key)
         flight, leader = self._claim_flight(merge_key)
         if not leader:
-            # A load or refresh for this key is already in flight here.
+            # A load or refresh for this key is already in flight here; its
+            # value pays for this election too, in the background.
+            if not self._spawn(self._run_follow, key, flight, ttl, view):
+                await self._run_follow(key, flight, ttl, view)
             return
         if not self._spawn(
-            self._run_refresh, key, merge_key, flight, factory, ttl, cas
+            self._run_refresh, key, merge_key, flight, factory, ttl, view
         ):
-            await self._run_refresh(key, merge_key, flight, factory, ttl, cas)
+            await self._run_refresh(key, merge_key, flight, factory, ttl, view)
+
+    async def _run_follow(
+        self, key: Key, flight: _AsyncFlight, ttl: int, view: ReadView
+    ) -> None:
+        try:
+            await self._follow(key, flight, ttl, view, release=False)
+        except Exception:
+            # The run's own failure already reached its callers or the hook.
+            return
 
     async def _run_refresh(
         self,
@@ -1018,7 +1082,7 @@ class AsyncMemcache(ScenarioBase):
         flight: _AsyncFlight,
         factory: Callable[[], Any],
         ttl: int,
-        cas: int,
+        view: ReadView,
     ) -> None:
         try:
             value = await self._call_factory(factory)
@@ -1030,13 +1094,26 @@ class AsyncMemcache(ScenarioBase):
                 else exc
             )
             self._finish_flight(merge_key, flight, error=published)
+            with anyio.CancelScope(shield=True):
+                await self._undo_election(key, view, release=False)
             if cancelled:
                 raise
             # The background path has no caller; its failures are
             # observability events.
             self._report(exc)
             return
-        await self._write_back(key, value, ttl, cas, release=False)
+        try:
+            with anyio.CancelScope(shield=True):
+                await self._write_back(key, value, ttl, view, release=False)
+        except BaseException:
+            # A native task cancellation, which no shield stops, cut the
+            # write-back short. The value exists, so every waiter still
+            # gets it, and the election goes back so the next reader does
+            # not wait out an unpaid placeholder or token.
+            self._finish_flight(merge_key, flight, value=value)
+            with anyio.CancelScope(shield=True):
+                await self._undo_election(key, view, release=False)
+            raise
         self._finish_flight(merge_key, flight, value=value)
 
     async def _local_compute(self, key: Key, factory: Callable[[], Any]) -> Any:
@@ -1060,29 +1137,30 @@ class AsyncMemcache(ScenarioBase):
         return value
 
     async def _write_back(
-        self, key: Key, value: Any, ttl: int, cas: int, release: bool
+        self, key: Key, value: Any, ttl: int, view: ReadView, release: bool
     ) -> None:
         """Store a recomputed value conditioned on the election's version.
 
-        See :meth:`memcache.experiment.client.Memcache._write_back`; the
-        async version additionally shields against the caller's own
-        cancellation once a value exists, so a computed result is not
-        thrown away at the last step.
+        See :meth:`memcache.experiment.client.Memcache._write_back`. The
+        callers shield this step and the flight's resolution against
+        cancellation, so a computed value is neither thrown away at the
+        last step nor left as a flight that never resolves.
         """
+        assert view.cas is not None
         try:
             raw, client_flags = dump_value(self._serializer, key, value)
         except Exception as exc:
             self._report(exc)
-            if release:
-                await self._release_lease(key, cas)
+            await self._undo_election(key, view, release)
             return
         op, stored = plan_store(
-            self._wire_key(key), key, raw, client_flags, ttl, compare_cas=cas
+            self._wire_key(key), key, raw, client_flags, ttl, compare_cas=view.cas
         )
         try:
             applied = stored(await self._run_one(op))
         except Exception as exc:
             self._report(exc)
+            await self._undo_election(key, view, release)
             return
         if not applied:
             self._report(
@@ -1090,6 +1168,23 @@ class AsyncMemcache(ScenarioBase):
                     "factory write-back of %r abandoned: the entry changed "
                     "during recomputation" % (key,)
                 )
+            )
+
+    async def _undo_election(self, key: Key, view: ReadView, release: bool) -> None:
+        """Give an election back when nothing was written for it.
+
+        See :meth:`memcache.experiment.client.Memcache._undo_election`.
+        """
+        assert view.cas is not None
+        if release:
+            await self._release_lease(key, view.cas)
+        elif view.stale:
+            # Inline rather than through _return_win's background task, so
+            # the caller's shield covers the request and closing the client
+            # cannot cancel it. The remaining ttl is left alone: the
+            # election's own reading of it has aged by a whole factory run.
+            await self._run_win(
+                key, plan_return_win(self._wire_key(key), replace(view, ttl=None))
             )
 
     async def _release_lease(self, key: Key, cas: int) -> None:
