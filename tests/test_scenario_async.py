@@ -343,7 +343,7 @@ async def test_degrade_absorbs_unacknowledged_idempotent_writes(hung_addr):
         on_failure=failures.append,
         timeout=0.2,
     ) as client:
-        assert await client.set("k", "v", ttl=60) is None
+        await client.set("k", "v", ttl=60)
         assert await client.delete("k") is False
         assert await client.touch("k", 60) is False
         assert await client.get("k", factory=lambda: "local", ttl=60) == "local"

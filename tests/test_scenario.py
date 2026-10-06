@@ -406,13 +406,13 @@ def test_lease_policy_validation():
     with pytest.raises(ValueError, match="lease_ttl"):
         Memcache(ADDR, lease_ttl=0)
     with pytest.raises(TypeError, match="lease_ttl"):
-        Memcache(ADDR, lease_ttl=1.5)
+        Memcache(ADDR, lease_ttl=1.5)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="30 days"):
         Memcache(ADDR, lease_ttl=timedelta(days=31))
     with pytest.raises(ValueError, match="lease_wait"):
         Memcache(ADDR, lease_wait=-1)
     with pytest.raises(TypeError, match="lease_wait"):
-        Memcache(ADDR, lease_wait="1")
+        Memcache(ADDR, lease_wait="1")  # type: ignore[arg-type]
     Memcache(
         ADDR, lease_ttl=timedelta(seconds=10), lease_wait=timedelta(milliseconds=50)
     ).close()
@@ -724,7 +724,11 @@ def test_slide_sticks_on_a_stale_entry(cache):
     assert cache.inspect("render").ttl > 1000
     # The token did go back: a factory reader is still elected.
     calls = []
-    rebuild = lambda: calls.append(1) or "new"  # noqa: E731
+
+    def rebuild():
+        calls.append(1)
+        return "new"
+
     assert cache.get("render", factory=rebuild, ttl=60) == "new"
     assert calls == [1]
 
