@@ -921,7 +921,7 @@ class ScenarioBase:
         if self._closed:
             raise RuntimeError("client is closed")
 
-    # -- verb planning, shared by direct calls and pipelines -----------
+    # -- verb planning, shared by direct calls and batches -----------
 
     def _call_get(self, key: Key, default: Any, extend_ttl: Ttl | None) -> Call:
         extend = None if extend_ttl is None else wire_ttl(extend_ttl, "extend_ttl")

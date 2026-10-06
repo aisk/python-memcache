@@ -261,15 +261,15 @@ def demo_buffers(cache: Memcache) -> None:
 # --------------------------------------------------------------------------
 
 
-def demo_pipeline(cache: Memcache) -> None:
-    section("pipeline")
+def demo_batch(cache: Memcache) -> None:
+    section("batch")
 
     cache.set("user:9", "alice", ttl=600)
-    with cache.pipeline() as p:
-        user = p.get("user:9")
-        hits = p.incr("rate:9", ttl=60)
-        p.touch("session:9", 1800)
-    # Deferred results are readable once the with block exits.
+    batch = cache.batch()
+    user = batch.get("user:9")
+    hits = batch.incr("rate:9", ttl=60)
+    batch.touch("session:9", 1800)
+    batch.execute()
     print("user:", user.value, "hits:", hits.value)
 
 
@@ -361,10 +361,11 @@ async def demo_async(addr: tuple[str, int]) -> None:
 
         print("factory:", await cache.get("async:report", factory=build, ttl=60))
 
-        async with cache.pipeline() as p:
-            user = p.get("async:user")
-            hits = p.incr("async:rate", ttl=60)
-        print("pipeline:", user.value, hits.value)
+        batch = cache.batch()
+        user = batch.get("async:user")
+        hits = batch.incr("async:rate", ttl=60)
+        await batch.execute()
+        print("batch:", user.value, hits.value)
 
 
 # --------------------------------------------------------------------------
@@ -382,7 +383,7 @@ def main() -> None:
             demo_claim(cache)
             demo_sessions(cache)
             demo_buffers(cache)
-            demo_pipeline(cache)
+            demo_batch(cache)
             demo_inspect(cache)
             demo_meta_namespace(cache)
         demo_failure_policy()

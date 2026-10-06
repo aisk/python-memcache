@@ -50,9 +50,10 @@ High-level client based on the meta protocol (experimental)
        cache.update("cart:42", lambda cart: cart + [item], default=[], ttl=1800)
 
        # Independent operations in one round trip per server.
-       with cache.pipeline() as p:
-           user = p.get("user:1")
-           hits = p.incr("rate:ip", ttl=60)
+       batch = cache.batch()
+       user = batch.get("user:1")
+       hits = batch.incr("rate:ip", ttl=60)
+       batch.execute()
        print(user.value, hits.value)
 
 ``AsyncMemcache`` is the same table of verbs plus ``await``; ``factory`` and ``fn`` accept sync or async callables, and refresh-ahead recomputations run as background tasks when the client is used as an async context manager.

@@ -392,12 +392,12 @@ class AsyncMetaNamespace:
         return await self._client._execute_meta(meta, timeout)
 
 
-class AsyncPipeline:
+class AsyncBatch:
     """Collects independent scenario operations for one round trip per server.
 
-    Async counterpart of :class:`memcache.experiment.client.Pipeline`: verbs
-    record synchronously and return :class:`Deferred` results; execution
-    happens when the ``async with`` block exits.
+    Async counterpart of :class:`memcache.experiment.client.Batch`: verbs
+    record synchronously and return :class:`Deferred` results; awaiting
+    :meth:`execute` sends them.
     """
 
     def __init__(self, client: "AsyncMemcache") -> None:
@@ -406,31 +406,18 @@ class AsyncPipeline:
         self._results: list[Deferred] = []
         self._done = False
 
-    async def __aenter__(self) -> "AsyncPipeline":
-        return self
-
-    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        if exc_type is not None:
-            self._skip()
-            return
-        await self._execute()
-
-    def _skip(self) -> None:
-        self._done = True
-        for deferred in self._results:
-            deferred._error = RuntimeError(
-                "pipeline was not executed because the with block raised"
-            )
-
     def _push(self, call: Call) -> Deferred:
         if self._done:
-            raise RuntimeError("pipeline was already executed")
+            raise RuntimeError("batch was already executed")
         deferred = Deferred()
         self._calls.append(call)
         self._results.append(deferred)
         return deferred
 
-    async def _execute(self) -> None:
+    async def execute(self) -> None:
+        """Send the recorded operations and settle every deferred result."""
+        if self._done:
+            raise RuntimeError("batch was already executed")
         self._done = True
         try:
             outcomes = await self._client._run_ops([call.op for call in self._calls])
@@ -860,10 +847,10 @@ class AsyncMemcache(ScenarioBase):
         self._check_open()
         return cast(ItemInfo | None, await self._run_call(self._call_inspect(key)))
 
-    def pipeline(self) -> AsyncPipeline:
+    def batch(self) -> AsyncBatch:
         """Batch independent operations into one round trip per server."""
         self._check_open()
-        return AsyncPipeline(self)
+        return AsyncBatch(self)
 
     # ------------------------------------------------------------------
     # factory machinery (S3/S4/S5)
@@ -1208,9 +1195,9 @@ class AsyncMemcache(ScenarioBase):
 
 
 __all__ = [
+    "AsyncBatch",
     "AsyncMemcache",
     "AsyncMetaNamespace",
-    "AsyncPipeline",
     "FOREVER",
     "ItemInfo",
 ]

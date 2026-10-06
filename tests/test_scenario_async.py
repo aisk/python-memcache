@@ -300,12 +300,13 @@ async def test_close_cancels_background_refresh():
 
 
 @pytest.mark.asyncio
-async def test_pipeline(cache):
+async def test_batch(cache):
     await cache.set("user", {"uid": 1}, ttl=600)
-    async with cache.pipeline() as p:
-        user = p.get("user")
-        hits = p.incr("rate", ttl=60)
-        touched = p.touch("session", 600)
+    batch = cache.batch()
+    user = batch.get("user")
+    hits = batch.incr("rate", ttl=60)
+    touched = batch.touch("session", 600)
+    await batch.execute()
     assert user.value == {"uid": 1}
     assert hits.value == 1
     assert touched.value is False
@@ -386,10 +387,11 @@ async def test_server_rejections_are_definite_and_local(cache):
     await cache.set("other", "v", ttl=60)
     with pytest.raises(TypeError, match="not a counter"):
         await cache.incr("text", ttl=60)
-    async with cache.pipeline() as p:
-        counter = p.incr("text", ttl=60)
-        written = p.set("a", "aval", ttl=60)
-        read = p.get("other")
+    batch = cache.batch()
+    counter = batch.incr("text", ttl=60)
+    written = batch.set("a", "aval", ttl=60)
+    read = batch.get("other")
+    await batch.execute()
     with pytest.raises(TypeError, match="not a counter"):
         counter.value
     assert written.value is None and await cache.get("a") == "aval"

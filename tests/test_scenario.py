@@ -138,8 +138,7 @@ def test_overlong_keys_are_argument_errors(cache):
         with pytest.raises(ValueError, match="key too long"):
             call()
     with pytest.raises(ValueError, match="key too long"):
-        with cache.pipeline() as p:
-            p.set(long_key, "v", ttl=60)
+        cache.batch().set(long_key, "v", ttl=60)
     # The prefix counts toward the limit, so a key that fits alone can
     # still be rejected once namespaced.
     with Memcache(ADDR, prefix="p" * 200) as prefixed:
@@ -801,17 +800,18 @@ def test_pop_never_loses_concurrent_appends(cache):
 
 
 # ----------------------------------------------------------------------
-# S12: pipeline
+# S12: batch
 
 
-def test_pipeline_runs_mixed_verbs_in_one_batch(cache):
+def test_batch_runs_mixed_verbs_in_one_round_trip(cache):
     cache.set("user", {"uid": 1}, ttl=600)
-    with cache.pipeline() as p:
-        user = p.get("user")
-        hits = p.incr("rate", ttl=60)
-        touched = p.touch("user", 900)
-        added = p.add("job", "1", ttl=60)
-        info = p.inspect("user")
+    batch = cache.batch()
+    user = batch.get("user")
+    hits = batch.incr("rate", ttl=60)
+    touched = batch.touch("user", 900)
+    added = batch.add("job", "1", ttl=60)
+    info = batch.inspect("user")
+    batch.execute()
     assert user.value == {"uid": 1}
     assert hits.value == 1
     assert touched.value is True
@@ -819,44 +819,49 @@ def test_pipeline_runs_mixed_verbs_in_one_batch(cache):
     assert isinstance(info.value, ItemInfo)
 
 
-def test_pipeline_value_unreadable_before_exit(cache):
-    with cache.pipeline() as p:
-        deferred = p.get("k")
-        with pytest.raises(RuntimeError):
-            deferred.value
+def test_batch_value_unreadable_before_execute(cache):
+    batch = cache.batch()
+    deferred = batch.get("k")
+    with pytest.raises(RuntimeError):
+        deferred.value
+    batch.execute()
     assert deferred.value is None
 
 
-def test_pipeline_semantic_outcomes_are_per_operation(cache):
+def test_batch_semantic_outcomes_are_per_operation(cache):
     cache.set("present", "v", ttl=60)
-    with cache.pipeline() as p:
-        hit = p.get("present")
-        miss = p.get("absent", "fallback")
-        not_replaced = p.replace("absent", "v", ttl=60)
-        deleted = p.delete("absent")
+    batch = cache.batch()
+    hit = batch.get("present")
+    miss = batch.get("absent", "fallback")
+    not_replaced = batch.replace("absent", "v", ttl=60)
+    deleted = batch.delete("absent")
+    batch.execute()
     assert hit.value == "v"
     assert miss.value == "fallback"
     assert not_replaced.value is False
     assert deleted.value is False
 
 
-def test_pipeline_execution_failure_reaches_every_deferred(cache):
+def test_batch_execution_failure_reaches_every_deferred(cache):
+    batch = cache.batch()
+    read = batch.get("k")
+    cache.close()
     with pytest.raises(RuntimeError, match="closed"):
-        with cache.pipeline() as p:
-            read = p.get("k")
-            cache.close()
+        batch.execute()
     with pytest.raises(RuntimeError, match="closed"):
         read.value
 
 
-def test_pipeline_body_exception_skips_execution(cache):
-    with pytest.raises(RuntimeError, match="boom"):
-        with cache.pipeline() as p:
-            deferred = p.set("skipped", "v", ttl=60)
-            raise RuntimeError("boom")
-    with pytest.raises(RuntimeError):
-        deferred.value
-    assert cache.get("skipped") is None
+def test_batch_sends_nothing_until_executed_and_executes_once(cache):
+    batch = cache.batch()
+    batch.set("pending", "v", ttl=60)
+    assert cache.get("pending") is None
+    batch.execute()
+    assert cache.get("pending") == "v"
+    with pytest.raises(RuntimeError, match="already executed"):
+        batch.execute()
+    with pytest.raises(RuntimeError, match="already executed"):
+        batch.get("pending")
 
 
 def test_pipeline_attribution_trusts_in_order_processing():
@@ -944,11 +949,12 @@ def test_server_rejections_are_definite_and_local(cache):
         cache.incr("text", ttl=60)
     # The rejection is that operation's own answer: nothing else in the
     # batch is disturbed, and the connection stays usable.
-    with cache.pipeline() as p:
-        counter = p.incr("text", ttl=60)
-        written = p.set("a", "aval", ttl=60)
-        read = p.get("other")
-        touched = p.touch("other", 600)
+    batch = cache.batch()
+    counter = batch.incr("text", ttl=60)
+    written = batch.set("a", "aval", ttl=60)
+    read = batch.get("other")
+    touched = batch.touch("other", 600)
+    batch.execute()
     with pytest.raises(TypeError, match="not a counter"):
         counter.value
     assert written.value is None and cache.get("a") == "aval"
@@ -964,13 +970,13 @@ def test_server_rejections_are_definite_and_local(cache):
         cache.meta.arithmetic("text", delta=1)
 
 
-def test_pipeline_has_no_multi_round_trip_verbs(cache):
-    pipeline = cache.pipeline()
+def test_batch_has_no_multi_round_trip_verbs(cache):
+    batch = cache.batch()
     with pytest.raises(TypeError):
-        pipeline.get("k", factory=lambda: 1, ttl=60)
-    assert not hasattr(pipeline, "update")
-    assert not hasattr(pipeline, "pop")
-    assert not hasattr(pipeline, "get_many")
+        batch.get("k", factory=lambda: 1, ttl=60)
+    assert not hasattr(batch, "update")
+    assert not hasattr(batch, "pop")
+    assert not hasattr(batch, "get_many")
 
 
 # ----------------------------------------------------------------------
@@ -1087,9 +1093,10 @@ def test_degrade_surfaces_unacknowledged_mutations(hung_cache):
     ):
         with pytest.raises(AmbiguousWriteError):
             mutate()
-    with hung_cache.pipeline() as p:
-        write = p.set("k", "v", ttl=60)
-        fragment = p.append("k", b"x", ttl=60)
+    batch = hung_cache.batch()
+    write = batch.set("k", "v", ttl=60)
+    fragment = batch.append("k", b"x", ttl=60)
+    batch.execute()
     assert write.value is None
     with pytest.raises(AmbiguousWriteError):
         fragment.value
@@ -1115,8 +1122,9 @@ def test_unreadable_values_follow_the_failure_policy(cache):
         assert lenient.get("pickled", default="d") == "d"
         assert lenient.get_many(["pickled"]) == {}
         assert lenient.get("pickled", factory=lambda: "local", ttl=60) == "local"
-        with lenient.pipeline() as p:
-            read = p.get("pickled", "d")
+        batch = lenient.batch()
+        read = batch.get("pickled", "d")
+        batch.execute()
         assert read.value == "d"
     assert len(failures) == 4
     assert all(isinstance(f.__cause__, SerializeError) for f in failures)
@@ -1175,11 +1183,12 @@ def test_degrade_factory_computes_without_cache(dead_cache):
     assert dead_cache.get("k", factory=lambda: "computed", ttl=60) == "computed"
 
 
-def test_degrade_pipeline_follows_the_table(dead_cache):
-    with dead_cache.pipeline() as p:
-        read = p.get("k", "d")
-        write = p.set("k", "v", ttl=60)
-        counter = p.incr("k", ttl=60)
+def test_degrade_batch_follows_the_table(dead_cache):
+    batch = dead_cache.batch()
+    read = batch.get("k", "d")
+    write = batch.set("k", "v", ttl=60)
+    counter = batch.incr("k", ttl=60)
+    batch.execute()
     assert read.value == "d"
     assert write.value is None
     with pytest.raises(OperationFailedError):
