@@ -226,20 +226,21 @@ buffered = cache.pop(f"events:{uid}")   # bytes, split by the caller
 
 `pop` 不限于字节流，取走一个用 `set` 存入的一次性令牌也是同样的用法。
 
-### 管线
+### 批量
 
 ```python
-with cache.pipeline() as p:
-    user = p.get(f"user:{uid}")
-    hits = p.incr(f"rate:{ip}", ttl=60)
-    p.touch(f"session:{sid}", ttl=1800)
+batch = cache.batch()
+user = batch.get(f"user:{uid}")
+hits = batch.incr(f"rate:{ip}", ttl=60)
+batch.touch(f"session:{sid}", ttl=1800)
+batch.execute()
 
 if hits.value > 100:
     raise TooManyRequests
 render(user.value)
 ```
 
-一个请求的前奏往往需要对不同 key 做几个互不依赖的操作，管线把它们合并为每个服务器一次往返。管线内的动词、签名和语义与客户端完全相同，唯一的区别是每次调用返回一个延迟结果，退出 with 块后它的 `.value` 才可读。单个操作失败只影响它自己的 `.value`。同一个 key 上的操作按记录顺序生效，因为它们走同一条连接，跨服务器之间没有顺序保证。本身包含多轮往返的操作（带 factory 的 `get`、`update`、`pop`、`_many` 家族）不出现在管线里。
+一个请求的前奏往往需要对不同 key 做几个互不依赖的操作，批量把它们合并为每个服务器一次往返。批量内的动词、签名和语义与客户端完全相同，唯一的区别是每次调用返回一个延迟结果，`execute()` 返回后它的 `.value` 才可读。`execute()` 之前不会发送任何东西，一个批量只执行一次。单个操作失败只影响它自己的 `.value`。同一个 key 上的操作按记录顺序生效，因为它们走同一条连接，跨服务器之间没有顺序保证。本身包含多轮往返的操作（带 factory 的 `get`、`update`、`pop`、`_many` 家族）不出现在批量里。
 
 ### 故障策略
 
@@ -249,7 +250,7 @@ render(user.value)
 cache = Memcache(*servers, on_error="degrade", on_failure=metrics.count)
 ```
 
-degrade 之下，读操作把故障报告为未命中，带 factory 的 `get` 本地计算但不写回，盲目的写操作（`set`、`delete`、`touch`、`append` 等）静默放弃。结果用于业务判断的方法（`add`、`replace`、`incr`、`decr`、`update`、`pop`）在 degrade 下仍然报错，因为编造一个答案比报错更危险。已发送但没有收到确认的写入，如果重复执行无害（`set`、`delete`、`touch`），就和其他故障一样被吸收；如果它可能已经生效且不能安全重复（`incr`、`decr`、`append`、`prepend`），则以 `AmbiguousWriteError` 浮现：degrade 降的是"缓存不可用"，绝不是"不知道变更有没有生效"。每个被吸收的故障仍然会到达 `on_failure` 钩子（默认走标准 logging），降级业务行为绝不降级可观测性。写入开始后客户端永远不会自动重试命令，因为盲目重试算术或追加可能让变更生效两次。被服务器直接拒绝的命令（对非数字值做计数、值超过服务器接受的大小）是确定的答案而不是歧义：`incr` 和 `decr` 抛 `TypeError`，其他动词抛 `OperationFailedError` 并把服务器的 `CommandError` 挂在 cause 上，同一 pipeline 里的其他操作不受影响。
+degrade 之下，读操作把故障报告为未命中，带 factory 的 `get` 本地计算但不写回，盲目的写操作（`set`、`delete`、`touch`、`append` 等）静默放弃。结果用于业务判断的方法（`add`、`replace`、`incr`、`decr`、`update`、`pop`）在 degrade 下仍然报错，因为编造一个答案比报错更危险。已发送但没有收到确认的写入，如果重复执行无害（`set`、`delete`、`touch`），就和其他故障一样被吸收；如果它可能已经生效且不能安全重复（`incr`、`decr`、`append`、`prepend`），则以 `AmbiguousWriteError` 浮现：degrade 降的是"缓存不可用"，绝不是"不知道变更有没有生效"。每个被吸收的故障仍然会到达 `on_failure` 钩子（默认走标准 logging），降级业务行为绝不降级可观测性。写入开始后客户端永远不会自动重试命令，因为盲目重试算术或追加可能让变更生效两次。被服务器直接拒绝的命令（对非数字值做计数、值超过服务器接受的大小）是确定的答案而不是歧义：`incr` 和 `decr` 抛 `TypeError`，其他动词抛 `OperationFailedError` 并把服务器的 `CommandError` 挂在 cause 上，同一批量里的其他操作不受影响。
 
 ### 异步客户端
 
@@ -258,9 +259,10 @@ degrade 之下，读操作把故障报告为未命中，带 factory 的 `get` �
 ```python
 async with AsyncMemcache(("localhost", 11211), serializer=JsonSerializer()) as cache:
     report = await cache.get("report:q3", factory=build_report, ttl=3600)
-    async with cache.pipeline() as p:
-        user = p.get(f"user:{uid}")
-        hits = p.incr(f"rate:{ip}", ttl=60)
+    batch = cache.batch()
+    user = batch.get(f"user:{uid}")
+    hits = batch.incr(f"rate:{ip}", ttl=60)
+    await batch.execute()
 ```
 
 以异步上下文管理器使用时，客户端持有一个任务组：refresh_ahead 与软失效宽限期的重算作为后台任务运行并在 close 时全部取消，factory 不运行在任何单个调用者的取消范围内，每个等待者自己的取消只结束它的等待。不进上下文管理器客户端也能工作，只是后台工作退化为在调用协程内就地执行。

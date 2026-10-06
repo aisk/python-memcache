@@ -455,7 +455,7 @@ class MetaNamespace:
 
 
 class Deferred:
-    """A pipeline operation's result, readable after the with block exits.
+    """A batch operation's result, readable once the batch has executed.
 
     Just a value that arrives late: ``.value`` returns exactly what the
     direct call would have returned, or raises exactly what it would have
@@ -473,19 +473,18 @@ class Deferred:
         if self._error is not None:
             raise self._error
         if self._value is _UNSET:
-            raise RuntimeError(
-                "pipeline results are readable after the with block exits"
-            )
+            raise RuntimeError("batch results are readable after execute()")
         return self._value
 
 
-class Pipeline:
+class Batch:
     """Collects independent scenario operations for one round trip per server.
 
     The verbs, signatures, and semantics match the client's; the only
     difference is that each call returns a :class:`Deferred` whose ``value``
-    becomes readable once the with block exits. One failing operation only
-    affects its own deferred result. Operations that are themselves multiple
+    becomes readable once :meth:`execute` returns. Nothing is sent before
+    then, and a batch executes once. One failing operation only affects its
+    own deferred result. Operations that are themselves multiple
     round trips (``get`` with a factory, ``update``, ``pop``, the ``_many``
     family) are not available here.
     """
@@ -496,31 +495,18 @@ class Pipeline:
         self._results: list[Deferred] = []
         self._done = False
 
-    def __enter__(self) -> "Pipeline":
-        return self
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        if exc_type is not None:
-            self._skip()
-            return
-        self._execute()
-
-    def _skip(self) -> None:
-        self._done = True
-        for deferred in self._results:
-            deferred._error = RuntimeError(
-                "pipeline was not executed because the with block raised"
-            )
-
     def _push(self, call: Call) -> Deferred:
         if self._done:
-            raise RuntimeError("pipeline was already executed")
+            raise RuntimeError("batch was already executed")
         deferred = Deferred()
         self._calls.append(call)
         self._results.append(deferred)
         return deferred
 
-    def _execute(self) -> None:
+    def execute(self) -> None:
+        """Send the recorded operations and settle every deferred result."""
+        if self._done:
+            raise RuntimeError("batch was already executed")
         self._done = True
         try:
             outcomes = self._client._run_ops([call.op for call in self._calls])
@@ -1018,10 +1004,10 @@ class Memcache(ScenarioBase):
         self._check_open()
         return cast(ItemInfo | None, self._run_call(self._call_inspect(key)))
 
-    def pipeline(self) -> Pipeline:
+    def batch(self) -> Batch:
         """Batch independent operations into one round trip per server."""
         self._check_open()
-        return Pipeline(self)
+        return Batch(self)
 
     # ------------------------------------------------------------------
     # factory machinery (S3/S4/S5)
@@ -1248,10 +1234,10 @@ class Memcache(ScenarioBase):
 
 
 __all__ = [
+    "Batch",
     "Deferred",
     "FOREVER",
     "ItemInfo",
     "Memcache",
     "MetaNamespace",
-    "Pipeline",
 ]

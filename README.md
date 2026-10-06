@@ -229,20 +229,21 @@ buffered = cache.pop(f"events:{uid}")   # bytes, split by the caller
 
 `pop` is not limited to byte streams; taking a one-time token stored with `set` works the same way.
 
-### Pipeline
+### Batch
 
 ```python
-with cache.pipeline() as p:
-    user = p.get(f"user:{uid}")
-    hits = p.incr(f"rate:{ip}", ttl=60)
-    p.touch(f"session:{sid}", ttl=1800)
+batch = cache.batch()
+user = batch.get(f"user:{uid}")
+hits = batch.incr(f"rate:{ip}", ttl=60)
+batch.touch(f"session:{sid}", ttl=1800)
+batch.execute()
 
 if hits.value > 100:
     raise TooManyRequests
 render(user.value)
 ```
 
-A request prelude often needs several independent operations on different keys; a pipeline batches them into one round trip per server. The verbs, signatures and semantics inside are the same as the client's, the only difference being that each call returns a deferred result whose `.value` becomes readable once the with block exits. One failing operation only affects its own `.value`. Operations on the same key are applied in the order they were recorded, since they travel on one connection; across servers there is no ordering. Operations that are themselves multiple round trips (`get` with a factory, `update`, `pop`, the `_many` family) are not available inside a pipeline.
+A request prelude often needs several independent operations on different keys; a batch combines them into one round trip per server. The verbs, signatures and semantics inside are the same as the client's, the only difference being that each call returns a deferred result whose `.value` becomes readable once `execute()` returns. Nothing is sent before `execute()`, and a batch executes once. One failing operation only affects its own `.value`. Operations on the same key are applied in the order they were recorded, since they travel on one connection; across servers there is no ordering. Operations that are themselves multiple round trips (`get` with a factory, `update`, `pop`, the `_many` family) are not available inside a batch.
 
 ### Failure policy
 
@@ -252,7 +253,7 @@ By default every infrastructure failure surfaces as an exception: `OperationFail
 cache = Memcache(*servers, on_error="degrade", on_failure=metrics.count)
 ```
 
-Under degrade, reads report failures as misses, a `get` with a factory computes locally without writing back, and blind writes (`set`, `delete`, `touch`, `append`, ...) give up silently. Verbs whose answer feeds a business decision (`add`, `replace`, `incr`, `decr`, `update`, `pop`) keep failing loudly even under degrade, because inventing an answer is worse than failing. A write that was sent but never acknowledged is absorbed like any other failure when repeating it would be harmless (`set`, `delete`, `touch`), but surfaces as `AmbiguousWriteError` when it may have landed and cannot be safely repeated (`incr`, `decr`, `append`, `prepend`): degrading covers "the cache is down", never "the mutation may or may not have applied". Every absorbed failure still reaches the `on_failure` hook (standard logging by default), so degrading business behavior never degrades observability. The client never automatically retries a command after writing begins, since blindly retrying arithmetic or append could apply the mutation twice. A command the server rejects outright (a counter on a non-numeric value, a value larger than the server accepts) is a definite answer, never ambiguous: `incr` and `decr` raise `TypeError`, other verbs raise `OperationFailedError` with the server's `CommandError` as the cause, and the other operations in the same pipeline are unaffected.
+Under degrade, reads report failures as misses, a `get` with a factory computes locally without writing back, and blind writes (`set`, `delete`, `touch`, `append`, ...) give up silently. Verbs whose answer feeds a business decision (`add`, `replace`, `incr`, `decr`, `update`, `pop`) keep failing loudly even under degrade, because inventing an answer is worse than failing. A write that was sent but never acknowledged is absorbed like any other failure when repeating it would be harmless (`set`, `delete`, `touch`), but surfaces as `AmbiguousWriteError` when it may have landed and cannot be safely repeated (`incr`, `decr`, `append`, `prepend`): degrading covers "the cache is down", never "the mutation may or may not have applied". Every absorbed failure still reaches the `on_failure` hook (standard logging by default), so degrading business behavior never degrades observability. The client never automatically retries a command after writing begins, since blindly retrying arithmetic or append could apply the mutation twice. A command the server rejects outright (a counter on a non-numeric value, a value larger than the server accepts) is a definite answer, never ambiguous: `incr` and `decr` raise `TypeError`, other verbs raise `OperationFailedError` with the server's `CommandError` as the cause, and the other operations in the same batch are unaffected.
 
 ### Async client
 
@@ -261,9 +262,10 @@ Under degrade, reads report failures as misses, a `get` with a factory computes 
 ```python
 async with AsyncMemcache(("localhost", 11211), serializer=JsonSerializer()) as cache:
     report = await cache.get("report:q3", factory=build_report, ttl=3600)
-    async with cache.pipeline() as p:
-        user = p.get(f"user:{uid}")
-        hits = p.incr(f"rate:{ip}", ttl=60)
+    batch = cache.batch()
+    user = batch.get(f"user:{uid}")
+    hits = batch.incr(f"rate:{ip}", ttl=60)
+    await batch.execute()
 ```
 
 Used as an async context manager, the client owns a task group: refresh-ahead and stale-grace recomputations run as background tasks and are cancelled on close, a factory does not run inside any single caller's cancellation scope, and each waiter's own cancellation only ends its wait. Without the context manager the client still works, but background work runs inline in the calling coroutine.

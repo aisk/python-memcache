@@ -25,23 +25,24 @@ from ..serialize import (
     Serializer,
     StrictSerializer,
 )
-from .async_client import AsyncMemcache, AsyncMetaNamespace, AsyncPipeline
+from .async_client import AsyncBatch, AsyncMemcache, AsyncMetaNamespace
 from .client import (
     FOREVER,
+    Batch,
     Deferred,
     ItemInfo,
     Memcache,
     MetaNamespace,
-    Pipeline,
     Ttl,
 )
 from .meta_api import MetaCommandResult
 
 __all__ = [
     "AmbiguousWriteError",
+    "AsyncBatch",
     "AsyncMemcache",
     "AsyncMetaNamespace",
-    "AsyncPipeline",
+    "Batch",
     "CommandError",
     "CompressedSerializer",
     "ConflictError",
@@ -58,7 +59,6 @@ __all__ = [
     "NotFoundError",
     "OperationFailedError",
     "PickleSerializer",
-    "Pipeline",
     "ProtocolError",
     "SerializeError",
     "Serializer",
