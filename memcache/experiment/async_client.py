@@ -181,9 +181,9 @@ class _AsyncFlight:
     """In-process merge point for one key's factory run.
 
     The winner publishes its result (or its exception) here and every
-    same-process waiter shares it, so a process runs at most one factory
-    per key. A waiter's own cancellation only stops its wait, never the
-    factory.
+    same-process waiter shares it, so callers the server did not elect
+    never run a factory of their own while one is in flight. A waiter's
+    own cancellation only stops its wait, never the factory.
     """
 
     __slots__ = ("_event", "_value", "_error")
@@ -869,6 +869,16 @@ class AsyncMemcache(ScenarioBase):
         self._flights[merge_key] = flight
         return flight, True
 
+    def _open_flight(self, merge_key: bytes) -> _AsyncFlight:
+        """Start an elected run's flight, superseding any run in flight.
+
+        The earlier run keeps its own waiters; callers arriving from now on
+        merge with this one.
+        """
+        flight = _AsyncFlight()
+        self._flights[merge_key] = flight
+        return flight
+
     def _finish_flight(
         self,
         merge_key: bytes,
@@ -957,46 +967,23 @@ class AsyncMemcache(ScenarioBase):
         the winning caller's cancel scope: its result is shared by every
         same-process waiter, and one short-deadline caller must not cancel
         it for everyone. Each waiter's own cancellation only ends its wait.
-        A caller the server elected while a run for the key is already in
-        flight here shares that run's value and still pays for its own
-        election by writing the value back through the version it holds
-        (see :meth:`_follow`).
+        A caller the server elected always starts a run of its own, even
+        while another run for the key is in flight here (see
+        :meth:`memcache.experiment.client.Memcache._lead`); only a caller
+        that was not elected shares a run already in flight.
         """
         merge_key = self._merge_key(key)
-        flight, leader = self._claim_flight(merge_key)
-        if not leader:
-            return await self._follow(key, flight, ttl, view, release)
+        if view.won:
+            flight = self._open_flight(merge_key)
+        else:
+            flight, leader = self._claim_flight(merge_key)
+            if not leader:
+                return await flight.wait()
         if not self._spawn(
             self._run_load, key, merge_key, flight, factory, ttl, view, release
         ):
             await self._run_load(key, merge_key, flight, factory, ttl, view, release)
         return await flight.wait()
-
-    async def _follow(
-        self,
-        key: Key,
-        flight: _AsyncFlight,
-        ttl: int,
-        view: ReadView,
-        release: bool,
-    ) -> Any:
-        """Share an in-flight run's value and pay this caller's election.
-
-        The run joined may be a local compute that writes nothing, or a
-        load whose own version is already stale, so the value is written
-        back through this election's version; if the run fails, the
-        election is undone instead of leaving its placeholder or token
-        consumed until it expires.
-        """
-        try:
-            value = await flight.wait()
-        except BaseException:
-            with anyio.CancelScope(shield=True):
-                await self._undo_election(key, view, release)
-            raise
-        with anyio.CancelScope(shield=True):
-            await self._write_back(key, value, ttl, view, release)
-        return value
 
     async def _run_load(
         self,
@@ -1041,26 +1028,11 @@ class AsyncMemcache(ScenarioBase):
         self, key: Key, factory: Callable[[], Any], ttl: int, view: ReadView
     ) -> None:
         merge_key = self._merge_key(key)
-        flight, leader = self._claim_flight(merge_key)
-        if not leader:
-            # A load or refresh for this key is already in flight here; its
-            # value pays for this election too, in the background.
-            if not self._spawn(self._run_follow, key, flight, ttl, view):
-                await self._run_follow(key, flight, ttl, view)
-            return
+        flight = self._open_flight(merge_key)
         if not self._spawn(
             self._run_refresh, key, merge_key, flight, factory, ttl, view
         ):
             await self._run_refresh(key, merge_key, flight, factory, ttl, view)
-
-    async def _run_follow(
-        self, key: Key, flight: _AsyncFlight, ttl: int, view: ReadView
-    ) -> None:
-        try:
-            await self._follow(key, flight, ttl, view, release=False)
-        except Exception:
-            # The run's own failure already reached its callers or the hook.
-            return
 
     async def _run_refresh(
         self,

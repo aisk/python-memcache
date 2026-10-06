@@ -458,44 +458,59 @@ def test_factory_exception_propagates_and_releases_lease(cache):
     assert time.monotonic() - start < 0.5
 
 
-def test_elected_follower_writes_the_shared_value_back(cache):
-    with Memcache(ADDR, serializer=PickleSerializer(), lease_wait=0.3) as short:
-        release = threading.Event()
-        calls = []
+def test_reelected_caller_does_not_reuse_a_run_from_before_the_delete(cache):
+    release = threading.Event()
+    entered = threading.Event()
 
-        def slow_build():
-            calls.append(1)
-            release.wait(5)
-            return "shared"
+    def slow_build():
+        entered.set()
+        release.wait(5)
+        return "before"
 
-        winner = threading.Thread(
-            target=lambda: short.get("k", factory=slow_build, ttl=60)
-        )
-        winner.start()
-        time.sleep(0.1)
-        # The winner's placeholder disappears under it (an operator delete,
-        # or a lease that expired before a slow factory finished), so the
-        # next same-process reader wins a fresh lease of its own while the
-        # first factory is still running.
-        cache.delete("k")
-        results = []
-        follower = threading.Thread(
-            target=lambda: results.append(short.get("k", factory=slow_build, ttl=60))
-        )
-        follower.start()
-        time.sleep(0.1)
-        release.set()
-        winner.join()
-        follower.join()
-        assert results == ["shared"]
-        assert calls == [1]
-        # The follower shared the winner's value and paid for its own lease
-        # with it, so the cache is warm instead of holding a placeholder
-        # that makes every reader wait out lease_wait until it expires.
-        assert cache.get("k") == "shared"
-        start = time.monotonic()
-        assert short.get("k", factory=lambda: "cold", ttl=60) == "shared"
-        assert time.monotonic() - start < 0.2
+    first = []
+    winner = threading.Thread(
+        target=lambda: first.append(cache.get("k", factory=slow_build, ttl=60))
+    )
+    winner.start()
+    entered.wait(1)
+    # The entry is invalidated while the first factory is still running, so
+    # the next same-process reader wins a fresh lease of its own. Sharing
+    # the run in flight would write a value computed before the delete
+    # back through the new lease.
+    cache.delete("k")
+    assert cache.get("k", factory=lambda: "after", ttl=60) == "after"
+    release.set()
+    winner.join()
+    assert first == ["before"]
+    assert cache.get("k") == "after"
+
+
+def test_unelected_readers_of_an_empty_entry_share_one_run(cache):
+    # A zero-byte entry no lease is attached to: every reader sees it as
+    # recomputable, and the server elects none of them.
+    cache.meta.set("empty", b"", ttl=60)
+    calls = []
+    barrier = threading.Barrier(8)
+
+    def slow_build():
+        calls.append(1)
+        time.sleep(0.2)
+        return "filled"
+
+    results = []
+
+    def read():
+        barrier.wait()
+        results.append(cache.get("empty", factory=slow_build, ttl=60))
+
+    threads = [threading.Thread(target=read) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert results == ["filled"] * 8
+    assert calls == [1]
+    assert cache.get("empty") == "filled"
 
 
 def test_factory_write_back_is_conditional(cache):

@@ -327,8 +327,8 @@ class _Flight:
     """In-process merge point for one key's factory run.
 
     The winner publishes its result (or its exception) here and every
-    same-process waiter shares it, so a process runs at most one factory
-    per key.
+    same-process waiter shares it, so callers the server did not elect
+    never run a factory of their own while one is in flight.
     """
 
     __slots__ = ("_done", "_value", "_error")
@@ -1113,6 +1113,17 @@ class Memcache(ScenarioBase):
             self._flights[merge_key] = flight
             return flight, True
 
+    def _open_flight(self, merge_key: bytes) -> _Flight:
+        """Start an elected run's flight, superseding any run in flight.
+
+        The earlier run keeps its own waiters; callers arriving from now on
+        merge with this one.
+        """
+        flight = _Flight()
+        with self._flights_lock:
+            self._flights[merge_key] = flight
+        return flight
+
     def _finish_flight(
         self,
         merge_key: bytes,
@@ -1198,33 +1209,31 @@ class Memcache(ScenarioBase):
 
         The factory's own exception propagates to every merged caller; only
         write-back failures are diverted to the failure hook. A caller the
-        server elected while a same-process run for the key is already in
-        flight shares that run's value and still pays for its own election
-        by writing the value back through the version it holds; the run it
-        joined may have been a local compute that writes nothing, and its
-        placeholder would otherwise keep every later reader waiting until
-        the lease expires. Whenever no write-back lands, the election is
-        undone (see :meth:`_undo_election`).
+        server elected always runs the factory itself, even while another
+        same-process run for the key is in flight: being elected again
+        means the entry was deleted, invalidated or re-leased after that
+        run started, and its value written through this election's version
+        would resurrect what the invalidation removed. Only a caller that
+        was not elected, reading a zero-byte entry nobody holds a lease on,
+        shares a run already in flight. Whenever no write-back lands, the
+        election is undone (see :meth:`_undo_election`).
         """
         assert view.cas is not None
         merge_key = self._merge_key(key)
-        flight, leader = self._claim_flight(merge_key)
-        if leader:
-            try:
-                value = factory()
-            except BaseException as exc:
-                self._finish_flight(merge_key, flight, error=exc)
-                self._undo_election(key, view, release)
-                raise
-            self._write_back(key, value, ttl, view, release)
-            self._finish_flight(merge_key, flight, value=value)
-            return value
+        if view.won:
+            flight = self._open_flight(merge_key)
+        else:
+            flight, leader = self._claim_flight(merge_key)
+            if not leader:
+                return flight.wait()
         try:
-            value = flight.wait()
-        except BaseException:
+            value = factory()
+        except BaseException as exc:
+            self._finish_flight(merge_key, flight, error=exc)
             self._undo_election(key, view, release)
             raise
         self._write_back(key, value, ttl, view, release)
+        self._finish_flight(merge_key, flight, value=value)
         return value
 
     def _local_compute(self, key: Key, factory: Callable[[], Any]) -> Any:

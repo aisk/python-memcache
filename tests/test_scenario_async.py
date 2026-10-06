@@ -110,36 +110,28 @@ async def test_factory_exception_reaches_waiters_and_releases_lease(cache):
 
 
 @pytest.mark.asyncio
-async def test_elected_follower_writes_the_shared_value_back():
-    async with AsyncMemcache(
-        ADDR, serializer=PickleSerializer(), lease_wait=0.3
-    ) as cache:
+async def test_reelected_caller_does_not_reuse_a_run_from_before_the_delete():
+    async with AsyncMemcache(ADDR, serializer=PickleSerializer()) as cache:
         await cache.flush_all()
         release = asyncio.Event()
-        calls = []
+        entered = asyncio.Event()
 
         async def slow_build():
-            calls.append(1)
+            entered.set()
             await release.wait()
-            return "shared"
+            return "before"
 
         winner = asyncio.ensure_future(cache.get("k", factory=slow_build, ttl=60))
-        await asyncio.sleep(0.1)
-        # The winner's placeholder disappears under it, so the next reader
-        # here wins a fresh lease while the first factory is still running.
+        await entered.wait()
+        # The entry is invalidated while the first factory is still running,
+        # so the next reader here wins a fresh lease of its own. Sharing the
+        # run in flight would write a value computed before the delete back
+        # through the new lease.
         await cache.delete("k")
-        follower = asyncio.ensure_future(cache.get("k", factory=slow_build, ttl=60))
-        await asyncio.sleep(0.1)
+        assert await cache.get("k", factory=lambda: "after", ttl=60) == "after"
         release.set()
-        assert await winner == "shared"
-        assert await follower == "shared"
-        assert calls == [1]
-        await asyncio.sleep(0.1)
-        # The follower paid for its lease with the shared value.
-        assert await cache.get("k") == "shared"
-        start = time.monotonic()
-        assert await cache.get("k", factory=lambda: "cold", ttl=60) == "shared"
-        assert time.monotonic() - start < 0.2
+        assert await winner == "before"
+        assert await cache.get("k") == "after"
 
 
 @pytest.mark.asyncio
