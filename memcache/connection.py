@@ -157,10 +157,14 @@ class Connection:
         except Exception as exc:
             raise PipelineError(written, [], exc)
 
-    def receive_pipeline(
+    def read_pipeline(
         self, written: int, timeout: float | None = None
-    ) -> list[MetaResult]:
-        """Read a sent pipeline's responses through its ``mn`` barrier.
+    ) -> tuple[list[MetaResult], bool]:
+        """Read once toward a sent pipeline's ``mn`` barrier.
+
+        Returns the responses that one read completed and whether the barrier
+        was among them, so a caller holding several pipelines in flight can
+        serve whichever socket has bytes ready instead of blocking on one.
 
         ``written`` is the number of commands already on the wire; it only
         attributes a failure (``PipelineError.written``), no response count
@@ -168,18 +172,18 @@ class Connection:
         """
         self._set_timeout(timeout)
         responses: list[MetaResult] = []
+        filled = False
         try:
             while True:
-                result = self._next_response()
-                if result.is_barrier:
-                    return responses
-                responses.append(result)
+                result = self._reader.next_response()
+                if result is None:
+                    if filled:
+                        return responses, False
+                    self._fill()
+                    filled = True
+                elif result.is_barrier:
+                    return responses, True
+                else:
+                    responses.append(result)
         except Exception as exc:
             raise PipelineError(written, responses, exc)
-
-    def execute_pipeline(
-        self, commands: list[MetaCommand], timeout: float | None = None
-    ) -> list[MetaResult]:
-        """Write a quiet pipeline and read through its ``mn`` barrier."""
-        self.send_pipeline(commands, timeout)
-        return self.receive_pipeline(len(commands), timeout)

@@ -8,6 +8,7 @@ the 1:1 typed protocol surface.
 
 from __future__ import annotations
 
+import selectors
 import threading
 import time
 from collections import deque
@@ -16,7 +17,14 @@ from dataclasses import replace
 from datetime import timedelta
 from time import monotonic
 from typing import Any, cast
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 
 import hashring
 
@@ -91,6 +99,17 @@ def _remaining(deadline: float | None) -> float | None:
     if remaining <= 0:
         raise TimeoutError("batch deadline exceeded")
     return remaining
+
+
+def _ready_timeout(deadline: float | None) -> float | None:
+    """The timeout for reading a socket already known to hold bytes.
+
+    The deadline bounds waiting for a server, not collecting what it has
+    already delivered, so a ready read still gets a moment once it passed.
+    """
+    if deadline is None:
+        return None
+    return max(deadline - monotonic(), 0.001)
 
 
 class _Server:
@@ -171,7 +190,7 @@ class _Server:
 
         Only the first chunk goes out here so the other servers in a batch can
         start theirs right away; the rest is written from :meth:`_InFlight
-        .finish`, interleaved with reading, so the request side never outruns
+        .advance`, interleaved with reading, so the request side never outruns
         the socket buffers.
         """
         chunks = chunk_pipeline(commands)
@@ -209,34 +228,99 @@ class _InFlight:
         self._connection = connection
         self._chunks = chunks
 
-    def finish(self, deadline: float | None) -> PipelineRun:
-        """Read each chunk's barrier, sending the next one as room frees up."""
-        run = PipelineRun([], written=len(self._chunks[0]))
+        self._position = 0
+        self._done = False
+        self._run = PipelineRun([], written=len(chunks[0]))
+
+    def fileno(self) -> int:
+        return self._connection.socket.fileno()
+
+    def advance(self, deadline: float | None, ready: bool = False) -> bool:
+        """Take one read off the socket; True once the run needs no more.
+
+        ``ready`` says the socket is known to hold bytes, which are taken
+        even past the deadline. A read that completes a chunk's barrier
+        sends the next chunk, so the request side keeps moving only as fast
+        as the responses are consumed.
+        """
+        run = self._run
         try:
-            for position, chunk in enumerate(self._chunks):
-                run.responses.extend(
-                    self._connection.receive_pipeline(run.written, _remaining(deadline))
-                )
-                run.confirmed += len(chunk)
-                if position + 1 < len(self._chunks):
-                    following = self._chunks[position + 1]
+            responses, barrier = self._connection.read_pipeline(
+                run.written,
+                _ready_timeout(deadline) if ready else _remaining(deadline),
+            )
+            run.responses.extend(responses)
+            if not barrier:
+                return False
+            run.confirmed += len(self._chunks[self._position])
+            self._position += 1
+            if self._position < len(self._chunks):
+                following = self._chunks[self._position]
+                try:
                     self._connection.send_pipeline(following, _remaining(deadline))
-                    run.written += len(following)
-        except BaseException as exc:
+                except PipelineError as exc:
+                    # Its count is local to the chunk that failed to send.
+                    run.written += exc.written
+                    raise
+                run.written += len(following)
+                return False
+        except Exception as exc:
+            self.fail(exc)
+        self._done = True
+        return True
+
+    def fail(self, error: Exception) -> None:
+        """End the run with ``error``.
+
+        Everything written so far is on the wire, so even an expired deadline
+        leaves the unconfirmed side effects ambiguous.
+        """
+        run = self._run
+        if isinstance(error, PipelineError):
+            run.responses.extend(error.responses)
+            run.written = max(run.written, error.written)
+            run.error = error.cause
+        else:
+            run.error = error
+        self._done = True
+
+    def settle(self) -> PipelineRun:
+        """Give the connection back, or drop it unless the run ended cleanly."""
+        if self._done and self._run.error is None:
+            self._server._release(self._connection)
+        else:
             self._server._discard(self._connection)
-            if not isinstance(exc, Exception):
-                raise
-            # Everything written so far is on the wire, so even an expired
-            # deadline leaves the unconfirmed side effects ambiguous.
-            if isinstance(exc, PipelineError):
-                run.responses.extend(exc.responses)
-                run.written = max(run.written, exc.written)
-                run.error = exc.cause
-            else:
-                run.error = exc
-            return run
-        self._server._release(self._connection)
-        return run
+        return self._run
+
+
+def _drain(flights: Collection[_InFlight], deadline: float | None) -> None:
+    """Read every flight to its end, serving whichever has bytes ready.
+
+    Reading them in a fixed order would let one unresponsive server spend
+    the whole deadline while the answers of the servers behind it sat
+    unread, failing operations that had in fact succeeded. For the same
+    reason an expired deadline only fails the flights with nothing left to
+    read: answers that made it in time are still collected.
+    """
+    expired: TimeoutError | None = None
+    with selectors.DefaultSelector() as selector:
+        for flight in flights:
+            selector.register(flight, selectors.EVENT_READ, flight)
+        while selector.get_map():
+            timeout: float | None = 0
+            if expired is None:
+                try:
+                    timeout = _remaining(deadline)
+                except TimeoutError as exc:
+                    expired = exc
+            ready = selector.select(timeout)
+            if expired is not None and not ready:
+                for key in selector.get_map().values():
+                    key.data.fail(expired)
+                return
+            for key, _ in ready:
+                if key.data.advance(deadline, ready=True):
+                    selector.unregister(key.fileobj)
 
 
 class _Flight:
@@ -625,24 +709,32 @@ class Memcache(ScenarioBase):
     def _run_pipelines(
         self, grouped: dict[_Server, list[MetaCommand]]
     ) -> dict[_Server, PipelineRun]:
-        """Write every server's pipeline, then read them back one by one.
+        """Write every server's pipeline, then read them back as they answer.
 
         The servers process their pipelines concurrently while this thread
-        drains responses sequentially, so the fan-out needs no worker
-        threads and its latency still tracks the slowest server. One server
-        failing never disturbs another; the constructor timeout bounds the
-        whole batch as a single deadline.
+        reads whichever one has responses ready, so the fan-out needs no
+        worker threads and its latency still tracks the slowest server. One
+        server failing never disturbs another; the constructor timeout
+        bounds the whole batch as a single deadline.
         """
         deadline = _deadline(self._timeout)
         runs: dict[_Server, PipelineRun] = {}
-        pending: list[tuple[_Server, _InFlight]] = []
-        for server, commands in grouped.items():
-            try:
-                pending.append((server, server.start_pipeline(commands, deadline)))
-            except Exception as exc:
-                runs[server] = PipelineRun.failed(exc)
-        for server, flight in pending:
-            runs[server] = flight.finish(deadline)
+        flights: dict[_Server, _InFlight] = {}
+        try:
+            for server, commands in grouped.items():
+                try:
+                    flights[server] = server.start_pipeline(commands, deadline)
+                except Exception as exc:
+                    runs[server] = PipelineRun.failed(exc)
+            if len(grouped) > 1:
+                _drain(flights.values(), deadline)
+            else:
+                for flight in flights.values():
+                    while not flight.advance(deadline):
+                        pass
+        finally:
+            for server, flight in flights.items():
+                runs[server] = flight.settle()
         return runs
 
     def _run_ops(self, ops: Sequence[WireOp]) -> list[WireOutcome]:

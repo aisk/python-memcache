@@ -244,6 +244,22 @@ def test_large_batch_crosses_pipeline_chunks(cache):
     assert found == mapping
 
 
+def test_large_batch_crosses_pipeline_chunks_on_several_servers(cache):
+    # Two ring nodes backed by the one memcached, each handed more than a
+    # chunk, so the later chunks go out while the other server is mid-read.
+    payload = "x" * 20_000
+    keys = ["bulk:%d" % i for i in range(120)]
+    mapping: dict[str | bytes, str] = {key: payload for key in keys}
+    with Memcache(("localhost", 11211), ("127.0.0.1", 11211)) as client:
+        per_server: dict[object, int] = {}
+        for key in keys:
+            server = client._server_for(key.encode())
+            per_server[server] = per_server.get(server, 0) + 1
+        assert len(per_server) == 2 and min(per_server.values()) > 26
+        client.set_many(mapping, ttl=60)
+        assert client.get_many(list(mapping)) == mapping
+
+
 # ----------------------------------------------------------------------
 # S3: factory and stampede protection
 
@@ -1185,6 +1201,53 @@ def test_degrade_never_fakes_business_answers(dead_cache):
 
 def test_degrade_factory_computes_without_cache(dead_cache):
     assert dead_cache.get("k", factory=lambda: "computed", ttl=60) == "computed"
+
+
+def test_hung_server_does_not_fail_the_healthy_one(hung_addr, cache):
+    # The hung server's operations are recorded first, so reading the
+    # servers in order would spend the whole deadline on it and report the
+    # healthy server's answers, already delivered, as lost.
+    with Memcache(hung_addr, ADDR, timeout=0.3) as client:
+        keys = ["k%d" % i for i in range(40)]
+        hung = [k for k in keys if client._server_for(k.encode()).addr == hung_addr]
+        healthy = [k for k in keys if k not in hung]
+        assert len(hung) >= 2 and len(healthy) >= 2
+        batch = client.batch()
+        stuck = [batch.incr(key, ttl=60) for key in hung[:2]]
+        counted = [batch.incr(key, ttl=60) for key in healthy[:2]]
+        read = batch.get(healthy[2], "absent")
+        batch.execute()
+        assert [deferred.value for deferred in counted] == [1, 1]
+        assert read.value == "absent"
+        for deferred in stuck:
+            with pytest.raises(AmbiguousWriteError):
+                deferred.value
+        # The healthy server's connection went back to the pool intact.
+        assert client.incr(healthy[0], ttl=60) == 2
+
+
+def test_slow_connect_does_not_fail_an_answered_server(cache):
+    # A server whose connect eats the whole deadline leaves no time to wait,
+    # but the server started before it has already answered and must be read.
+    with Memcache(("localhost", 11211), ("127.0.0.1", 11211), timeout=0.3) as client:
+        keys = ["k%d" % i for i in range(40)]
+        first, second = client._servers
+        answered = [k for k in keys if client._server_for(k.encode()) is first]
+        unreachable = [k for k in keys if client._server_for(k.encode()) is second]
+
+        def blackholed(commands, deadline):
+            time.sleep(0.35)
+            raise TimeoutError("timed out")
+
+        second.start_pipeline = blackholed  # type: ignore[method-assign]
+        batch = client.batch()
+        counted = batch.incr(answered[0], ttl=60)
+        lost = batch.incr(unreachable[0], ttl=60)
+        batch.execute()
+        assert counted.value == 1
+        with pytest.raises(OperationFailedError) as info:
+            lost.value
+        assert not isinstance(info.value, AmbiguousWriteError)
 
 
 def test_degrade_batch_follows_the_table(dead_cache):
